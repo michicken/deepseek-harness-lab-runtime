@@ -57,6 +57,14 @@ export class DshExecutor implements RoundExecutor {
               ) + 1,
             text: this.systemPrompt,
           });
+          agentCtx.on("tools/pre-execute", async (exec, next) => {
+            const reason = hostGuard(
+              exec.name,
+              exec.arguments,
+              context.lease.mission.cwd,
+            );
+            return reason === undefined ? next() : { kind: "deny", reason };
+          });
           agentCtx.on("agent/pre-step", async (_payload, next) => {
             context.signal.throwIfAborted();
             this.store.assertLease(context.lease);
@@ -329,4 +337,48 @@ Task board summary: ${JSON.stringify(tasks.slice(-20).map((t) => ({ id: t.id, ti
 
 Make concrete progress using tools and verifiable experiments. You may delegate with installed dsh tools when useful; coordinate shared files. Maintain a durable task DAG with lab_tasks. Prefer external artifacts for detailed notes. Call lab_checkpoint during meaningful work so a crash does not discard the handoff. This round uses a fresh Session; inspect workspace and checkpoint instead of assuming earlier conversation is available.
 You MUST finish with lab_round_report. Include exact completed work, failed approaches, evidence paths/results, and the next useful action. Use blocked when human input or authorization is needed. Use wait for unavailable external work; do not loop or invent activity. Never claim commands ran without tool evidence. A crash can replay this round: make external changes idempotent and check existing results before repeating them. There is no total token/round budget; provider context limits and per-round operational timeouts still apply.`;
+}
+
+const CLASH_PATTERN = /\b(clashx?|mihomo|clash[- ]?verge)\b/i;
+const HOST_COMMAND_PATTERN =
+  /\b(osascript|launchctl|systemsetup|networksetup|diskutil|csrutil|nvram|tmutil|shutdown|reboot|killall|pkill|sudo|defaults\s+write)\b/i;
+const HOST_PATH_PATTERN =
+  /(?:^|[\s"'=:])(?:~|\$HOME|\/Users\/|\/System\/|\/Library\/|\/Applications\/|\/private\/|\/etc\/)/;
+
+/** Best-effort process guard. Container/VM isolation remains the real boundary. */
+export function hostGuard(
+  name: string,
+  args: unknown,
+  workspace: string,
+): string | undefined {
+  const serialized = JSON.stringify(args);
+  if (CLASH_PATTERN.test(serialized)) {
+    return "Clash/Mihomo is explicitly out of scope: do not read, modify, control, probe, or route traffic through it.";
+  }
+  if (/computer|cua|osascript|applescript/i.test(name)) {
+    return "Host GUI and system control are outside the lab boundary.";
+  }
+  const record =
+    typeof args === "object" && args !== null
+      ? (args as Record<string, unknown>)
+      : {};
+  const filePath = record.file_path ?? record.path;
+  if (typeof filePath === "string" && (name === "write" || name === "edit")) {
+    const target = resolve(workspace, filePath);
+    const rel = relative(workspace, target);
+    if (rel.startsWith("..") || isAbsolute(rel)) {
+      return "File writes are restricted to the mission workspace; the macOS host is out of scope.";
+    }
+  }
+  const command = record.command ?? record.cmd;
+  if (typeof command === "string") {
+    const guardedCommand = command.split(workspace).join("<workspace>");
+    if (HOST_COMMAND_PATTERN.test(guardedCommand)) {
+      return "This command can modify the macOS host; run the equivalent inside the isolated lab instead.";
+    }
+    if (HOST_PATH_PATTERN.test(guardedCommand)) {
+      return "Commands referencing host home/system paths are blocked; use paths inside the mission workspace or the isolated lab.";
+    }
+  }
+  return undefined;
 }

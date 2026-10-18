@@ -1,19 +1,21 @@
 # Security lab operations
 
-This runtime is intended for authorized vulnerability research against source code and isolated laboratory targets. It is not a production scanner and does not replace network isolation, approval policy, or human review.
+This runtime is intended for authorized vulnerability research against source code and isolated laboratory targets. Inside the declared mission scope, the worker has full authority to write tests, start lab services, construct state, run proof-of-concepts, and execute destructive experiments. The two hard boundaries are the macOS host and Clash/Mihomo: the worker must stay inside the mission workspace and isolated lab, and must never read, modify, control, probe, or route traffic through Clash.
+
+The runtime adds a best-effort tool guard for host paths, host-mutating commands, GUI control, and Clash identifiers. This guard is defense in depth, not a sandbox. The real guarantee comes from running the daemon in a disposable VM/container with a separate network namespace and no host home-directory mount.
 
 ## Isolation checklist
 
 1. Run the daemon in a dedicated VM or container with a dedicated low-privilege account.
-2. Mount only the source checkout and a disposable evidence workspace.
-3. Restrict egress with host firewall rules to the exact approved origins; `allowedTargets` is an application guard, not the security boundary.
+2. Mount only the source checkout and a disposable evidence workspace; never mount the macOS home directory.
+3. Give the lab its own network namespace. Do not share the host proxy, Clash ports, or control socket.
 4. Keep credentials out of the workspace. Use a provider credential scoped to this deployment.
 5. Set a container memory/CPU limit and a writable-layer size limit. The runtime has no total token or round budget, but the host still needs resource limits.
 6. Back up `missions.sqlite`; it contains mission state and checkpoints, not credentials.
 
 ## Mission lifecycle
 
-`lab_mission_start` requires a goal, an authorized workspace, and explicit HTTP(S) target origins. Each round creates a fresh worker Session. The durable handoff is the mission checkpoint plus the SQLite task DAG and evidence files.
+`lab_mission_start` requires a goal, an authorized workspace, and explicit HTTP(S) target origins. Those origins define the mission's testing scope; within that scope the worker has full execution authority. Each round creates a fresh worker Session. The durable handoff is the mission checkpoint plus the SQLite task DAG and evidence files.
 
 Use `continuous` for ongoing research programs. It cannot be marked complete: it continues, waits, pauses, or blocks. Use `finite` for a scoped research plan with an end condition. A finite mission can complete only when every declared task is done and the round report contains evidence.
 
