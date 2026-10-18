@@ -1,6 +1,6 @@
 # DeepSeek Harness Lab Runtime
 
-Durable mission runtime for authorized security research. The V3.2-LAB research prompt adds non-stopping continuous execution, long-running checkpoints, idempotent replay, target authorization, and evidence-hash rules. `Lab Mission (24h)` runs the research directly inside the visible owner Session: normal tools, calls, outputs, checkpoints, and later rounds stay in its transcript and trajectory. Missions explicitly started in worker mode remain available for separate worker Sessions.
+Durable mission runtime for authorized security research. The V3.2-LAB-R2 research prompt adds non-stopping continuous execution, 24-action work packages, long-running checkpoints, idempotent replay, target authorization, and evidence-hash rules. `Lab Mission (24h)` runs the research directly inside the visible owner Session: normal tools, calls, outputs, checkpoints, and later rounds stay in its transcript and trajectory. Missions explicitly started in worker mode remain available for separate worker Sessions.
 
 Mission state deliberately lives outside `dsh-jobs-local`, because that registry is process-local. SQLite WAL plus `BEGIN IMMEDIATE` gives transactional claims, fenced leases, heartbeat renewal, and crash recovery across daemon processes.
 
@@ -11,7 +11,7 @@ Mission state deliberately lives outside `dsh-jobs-local`, because that registry
 - `lab_mission_control`: pause, resume, or permanently stop an owned mission.
 - `Lab Mission (24h)` mode: the first user message becomes one never-ending `continuous` mission; the same Agent performs the research with its ordinary session tools. Later user messages are corrections and guidance for that Mission, never new Missions.
 - Visible mission tools: `lab_checkpoint`, `lab_tasks`, `lab_finding`, and `lab_round_report` run in the owner Session and appear in its trajectory.
-- Round handoff has a runtime effort floor: a report requires six successful non-control research actions plus a checkpoint. An early report is rejected and the same Session must continue.
+- Round handoff has a runtime effort floor: a visible continuous report requires 24 successful non-control research actions plus a checkpoint (worker/finite missions require six). An early report is rejected and the same Session must continue. The floor is configurable with `LAB_MIN_VISIBLE_ROUND_WORK_UNITS`.
 - A visible `continuous` Mission keeps running in the same owner Session and the same live turn. `lab_round_report` records a checkpoint and immediately returns to the next tool call; it is not a turn-ending signal. `wait`, `complete`, `blocked`, `ask_user_question`, and turns that end without a tool call are rejected or steered back into work. Only explicit human pause/stop ends it.
 - A visible mission remains in the same owner Session and is never silently moved to a child Session. A visible mission waits unclaimed until its owner Session is loaded.
 - Explicit worker-mode missions remain available for users who choose a separate Session.
@@ -30,6 +30,12 @@ The plugin does not claim infinite tokens. Each model request remains bounded by
 npm install
 npm test
 npm run typecheck
+```
+
+If `tsc` stalls while reading TypeScript lib files on macOS 27, rebuild the public `lib/index.js` entry with the bundled fallback:
+
+```sh
+node_modules/.bin/rolldown -c rolldown.config.mjs
 ```
 
 `examples/github-actions-ci.yml` is the CI definition. Copy it to `.github/workflows/ci.yml` after granting the GitHub token `workflow` scope.
