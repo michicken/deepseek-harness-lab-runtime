@@ -29,6 +29,7 @@ export class DshExecutor implements RoundExecutor {
     let turnError: Error | undefined;
     let handle: AgentHandle | undefined;
     const store = this.store;
+    const parent = this.ctx.agents.get(SessionId(context.lease.mission.owner));
     const id = SessionId(
       `lab-${context.lease.mission.id}-${context.lease.fence}-${randomUUID()}`,
     );
@@ -42,11 +43,21 @@ export class DshExecutor implements RoundExecutor {
     try {
       handle = await this.ctx.agents.create({
         sessionId: id,
+        ...(parent === undefined ? {} : { parentAgent: parent }),
         agentOptions: {
           provider: context.lease.mission.provider,
           model: context.lease.mission.model,
         },
-        meta: { cwd: context.lease.mission.cwd },
+        meta: {
+          cwd: context.lease.mission.cwd,
+          ...(parent === undefined
+            ? {}
+            : {
+                parentSession: SessionId(context.lease.mission.owner),
+                origin: "subagent" as const,
+                delegationDepth: 1,
+              }),
+        },
         signal: context.signal,
         setup: (agentCtx) => {
           agentCtx.systemPrompt.section({

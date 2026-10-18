@@ -17,6 +17,8 @@ The runtime adds a best-effort tool guard for host paths, host-mutating commands
 
 `lab_mission_start` requires a goal, an authorized workspace, and explicit HTTP(S) target origins. Those origins define the mission's testing scope; within that scope the worker has full execution authority. Each round creates a fresh worker Session. The durable handoff is the mission checkpoint plus the SQLite task DAG and evidence files.
 
+With `missionModePreset: lab-mission`, the controller session does not need a tool call: the first non-empty user message becomes a `continuous` mission automatically. The controller stays in the foreground and every worker round appears as a child Session (`origin: subagent`, `parentSession` = controller). This is the visible operating mode: open the child Session to inspect the real commands, tool calls, checkpoints, and evidence instead of treating the mission as a background black box.
+
 Use `continuous` for ongoing research programs. It cannot be marked complete: it continues, waits, pauses, or blocks. Use `finite` for a scoped research plan with an end condition. A finite mission can complete only when every declared task is done and the round report contains evidence.
 
 `lab_mission_control` pauses, resumes, or permanently stops a mission. Pause and stop revoke the lease immediately; the worker is cancelled at the next heartbeat and cannot commit a stale result.

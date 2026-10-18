@@ -1,5 +1,6 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import { defineTool } from "@deepseek-ai/dsh-tools";
+import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { realpathSync, statSync } from "node:fs";
 import { isAbsolute, resolve, relative } from "node:path";
 import { homedir } from "node:os";
@@ -20,6 +21,7 @@ export interface Config extends Partial<RuntimeOptions> {
   autoStart?: boolean;
   allowedTargets?: string[];
   promptFile?: string;
+  missionModePreset?: string;
 }
 export const name = "lab-runtime";
 export const inject = [
@@ -29,6 +31,32 @@ export const inject = [
   "agentDefaultModel",
   "systemPrompt",
 ];
+
+/**
+ * The durable session header records the composition the session was created
+ * with, but switching presets in the UI only appends an
+ * `agent-preset/selected` event. Read the latest selection so the Lab Mission
+ * mode works both for fresh sessions and for an existing session switched into
+ * the mode.
+ */
+export function currentAgentPreset(session: {
+  header: { agentPreset?: string | undefined };
+  snapshotEvents(): readonly unknown[];
+}): string | undefined {
+  const events = session.snapshotEvents() as readonly {
+    type?: string;
+    data?: { agentPreset?: unknown };
+  }[];
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (
+      event?.type === "agent-preset/selected" &&
+      typeof event.data?.agentPreset === "string"
+    )
+      return event.data.agentPreset;
+  }
+  return session.header.agentPreset;
+}
 declare module "@deepseek-ai/cordis" {
   interface Context {
     labRuntime: LabService;
@@ -126,6 +154,105 @@ export class LabService extends Service {
         },
       }),
     );
+
+    // Dedicated controller mode: the first message in a fresh Lab Mission
+    // session becomes the mission goal automatically. No tool call is needed
+    // from the user, and the controller never performs the research itself.
+    ctx.on("agent/pre-step", async ({ agent, messages }, next) => {
+      if (process.env.LAB_RUNTIME_DEBUG)
+        console.error(
+          "lab-runtime/pre-step",
+          JSON.stringify({
+            preset: currentAgentPreset(agent.session),
+            configured: config.missionModePreset,
+            messages: messages.length,
+          }),
+        );
+      if (
+        config.missionModePreset === undefined ||
+        currentAgentPreset(agent.session) !== config.missionModePreset ||
+        messages.length === 0
+      ) {
+        return next();
+      }
+      const active = service.store
+        .list(agent.id)
+        .find((mission) => !["stopped", "completed"].includes(mission.status));
+      if (active !== undefined) return next();
+      const goal = messages
+        .filter((message) => message.source.kind === "user")
+        .flatMap((message) => message.content)
+        .filter((block) => block.type === "text")
+        .map((block) => block.text)
+        .join("\n")
+        .trim();
+      if (goal.length === 0) return next();
+      const cwd = agent.session.header.cwd;
+      const allowedWorkspace =
+        cwd !== undefined &&
+        allowed.some((root) => {
+          const rel = relative(root, cwd);
+          return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+        });
+      if (!allowedWorkspace || config.allowedTargets === undefined) {
+        return {
+          kind: "enter",
+          messages: [
+            createUserMessage({
+              content: [
+                {
+                  type: "text",
+                  text: "Lab Mission mode could not start: the session workspace is not in allowedWorkspaces, or allowedTargets is not configured. Ask the human to fix the profile.",
+                },
+              ],
+              source: { kind: "plugin", plugin: "lab-runtime" },
+            }),
+          ],
+        };
+      }
+      const selection = ctx.agentDefaultModel.currentSelection();
+      try {
+        const mission = service.store.create({
+          owner: agent.id,
+          goal,
+          cwd: cwd!,
+          provider: agent.options.provider ?? selection.provider,
+          model: agent.options.model ?? selection.model,
+          targets: config.allowedTargets,
+          mode: "continuous",
+        });
+        service.runtime.tick();
+        return {
+          kind: "enter",
+          messages: [
+            createUserMessage({
+              content: [
+                {
+                  type: "text",
+                  text: `Mission ${mission.id} has been created and queued for durable execution. Goal: ${goal}. The runtime is running worker Sessions that appear as child sessions of this controller. Reply with a short launch card: mission id, target scope, workspace, and how to ask for status. Do not perform the research yourself and do not call lab_mission_start.`,
+                },
+              ],
+              source: { kind: "plugin", plugin: "lab-runtime" },
+            }),
+          ],
+        };
+      } catch (error) {
+        return {
+          kind: "enter",
+          messages: [
+            createUserMessage({
+              content: [
+                {
+                  type: "text",
+                  text: `Lab Mission mode could not start: ${error instanceof Error ? error.message : String(error)}`,
+                },
+              ],
+              source: { kind: "plugin", plugin: "lab-runtime" },
+            }),
+          ],
+        };
+      }
+    });
     ctx.tools.register(
       defineTool({
         name: "lab_mission_status",

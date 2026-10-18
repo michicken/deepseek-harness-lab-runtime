@@ -6,3 +6,4 @@
         allowedWorkspaces: [/absolute/path/to/isolated/workspace]
         allowedTargets: ["http://127.0.0.1:8080"]
         promptFile: /absolute/path/to/deepseek-harness-lab-runtime/assets/security-research-system-prompt.txt
+        missionModePreset: lab-mission
