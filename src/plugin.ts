@@ -15,6 +15,14 @@ import type {} from "@deepseek-ai/dsh-agent-loop";
 import type {} from "@deepseek-ai/dsh-cmdline";
 import type {} from "@deepseek-ai/dsh-system-prompt";
 
+// dsh 0.1.x calls this a plugin source; dsh 0.2.x stores the producer-owned
+// kind directly and rejects the legacy { kind: "plugin" } wrapper at append
+// time. The string form is accepted by both runtimes.
+const PLUGIN_SOURCE = { kind: "plugin:lab-runtime" } as unknown as {
+  kind: "plugin";
+  plugin: string;
+};
+
 export interface Config extends Partial<RuntimeOptions> {
   stateDir?: string;
   allowedWorkspaces?: string[];
@@ -22,6 +30,7 @@ export interface Config extends Partial<RuntimeOptions> {
   allowedTargets?: string[];
   promptFile?: string;
   missionModePreset?: string;
+  missionWorkerPreset?: string;
 }
 export const name = "lab-runtime";
 export const inject = [
@@ -91,7 +100,12 @@ export class LabService extends Service {
       throw new Error(
         "promptFile is not the compatible V3.1-LAB security research prompt",
       );
-    this.executor = new DshExecutor(ctx, this.store, systemPrompt);
+    this.executor = new DshExecutor(
+      ctx,
+      this.store,
+      systemPrompt,
+      config.missionWorkerPreset,
+    );
     const options: Partial<RuntimeOptions> = {};
     for (const key of Object.keys(defaults) as (keyof RuntimeOptions)[])
       if (config[key] !== undefined) options[key] = config[key];
@@ -205,7 +219,7 @@ export class LabService extends Service {
                   text: "Lab Mission mode could not start: the session workspace is not in allowedWorkspaces, or allowedTargets is not configured. Ask the human to fix the profile.",
                 },
               ],
-              source: { kind: "plugin", plugin: "lab-runtime" },
+              source: PLUGIN_SOURCE,
             }),
           ],
         };
@@ -232,7 +246,7 @@ export class LabService extends Service {
                   text: `Mission ${mission.id} has been created and queued for durable execution. Goal: ${goal}. The runtime is running worker Sessions that appear as child sessions of this controller. Reply with a short launch card: mission id, target scope, workspace, and how to ask for status. Do not perform the research yourself and do not call lab_mission_start.`,
                 },
               ],
-              source: { kind: "plugin", plugin: "lab-runtime" },
+              source: PLUGIN_SOURCE,
             }),
           ],
         };
@@ -247,7 +261,7 @@ export class LabService extends Service {
                   text: `Lab Mission mode could not start: ${error instanceof Error ? error.message : String(error)}`,
                 },
               ],
-              source: { kind: "plugin", plugin: "lab-runtime" },
+              source: PLUGIN_SOURCE,
             }),
           ],
         };

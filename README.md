@@ -48,11 +48,14 @@ Build the package, then add an absolute path to `lib/index.js` in a profile patc
         allowedTargets: ["http://127.0.0.1:8080"]
         promptFile: /absolute/path/to/deepseek-harness-lab-runtime/assets/security-research-system-prompt.txt
         missionModePreset: lab-mission
+        missionWorkerPreset: standard
 ```
 
 ### Lab Mission (24h) mode
 
 `missionModePreset` is optional. When set, a session created with that agent preset gets a controller-only composition: the first non-empty user message is turned into a `continuous` mission before the model sees it. The controller receives a launch-card instruction and must not execute research itself. Every worker round is a fresh child Session, so the UI shows the real execution trace instead of a black box.
+
+`missionWorkerPreset` selects the Agent preset mounted into each Worker Session. Set it to a preset that includes the tools the worker needs; desktop dsh 0.2.x deployments normally use `standard`. The worker Session records that preset and remains a child of its controller. If this option is omitted, the Worker joins its controller's current preset when the runtime can resolve that composition.
 
 For dsh 0.1.x, create a preset directory such as `~/.dsh/.agent-presets/lab-mission/` with `preset.yml` and `agent.cordis.yml`. For dsh 0.2.x, the preset is a declarative profile row:
 

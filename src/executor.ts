@@ -16,6 +16,11 @@ import {
 import type {} from "@deepseek-ai/dsh-agent-loop";
 import type {} from "@deepseek-ai/dsh-system-prompt";
 
+const PLUGIN_SOURCE = { kind: "plugin:lab-runtime" } as unknown as {
+  kind: "plugin";
+  plugin: string;
+};
+
 /** Uses actual public dsh Agent APIs. Fresh sessions bound per-round context growth. */
 export class DshExecutor implements RoundExecutor {
   readonly workers = new Set<string>();
@@ -23,6 +28,7 @@ export class DshExecutor implements RoundExecutor {
     private readonly ctx: Context,
     private readonly store: MissionStore,
     private readonly systemPrompt: string,
+    private readonly workerPreset?: string,
   ) {}
   async run(context: RoundContext): Promise<RoundReport> {
     let report: RoundReport | undefined;
@@ -30,6 +36,14 @@ export class DshExecutor implements RoundExecutor {
     let handle: AgentHandle | undefined;
     const store = this.store;
     const parent = this.ctx.agents.get(SessionId(context.lease.mission.owner));
+    const presetService = parent?.ctx.get("agentPresets") as
+      | AgentPresetRuntime
+      | undefined;
+    const workerPreset =
+      this.workerPreset ??
+      (parent === undefined
+        ? undefined
+        : presetService?.composedPreset(parent.ctx));
     const id = SessionId(
       `lab-${context.lease.mission.id}-${context.lease.fence}-${randomUUID()}`,
     );
@@ -50,6 +64,7 @@ export class DshExecutor implements RoundExecutor {
         },
         meta: {
           cwd: context.lease.mission.cwd,
+          ...(workerPreset === undefined ? {} : { agentPreset: workerPreset }),
           ...(parent === undefined
             ? {}
             : {
@@ -59,7 +74,20 @@ export class DshExecutor implements RoundExecutor {
               }),
         },
         signal: context.signal,
-        setup: (agentCtx) => {
+        setup: async (agentCtx) => {
+          if (this.workerPreset !== undefined) {
+            const childPresets = agentCtx.get("agentPresets") as
+              | AgentPresetRuntime
+              | undefined;
+            if (childPresets === undefined)
+              throw new Error(
+                `Configured mission worker preset "${this.workerPreset}" requires agentPresets`,
+              );
+            await childPresets.mount(agentCtx, this.workerPreset);
+          } else if (parent !== undefined) {
+            (agentCtx.get("agentPresets") as AgentPresetRuntime | undefined)
+              ?.composeFrom(agentCtx, parent.ctx);
+          }
           agentCtx.systemPrompt.section({
             name: "lab-security-research-system-prompt-v3.1",
             order:
@@ -292,7 +320,7 @@ export class DshExecutor implements RoundExecutor {
       const m = context.lease.mission;
       handle.agent.followup(
         createUserMessage({
-          source: { kind: "plugin", plugin: "lab-runtime" },
+          source: PLUGIN_SOURCE,
           content: [{ type: "text", text: buildPrompt(context) }],
         }),
       );
@@ -326,6 +354,12 @@ export class DshExecutor implements RoundExecutor {
       this.workers.delete(id);
     }
   }
+}
+
+interface AgentPresetRuntime {
+  composedPreset(ctx: Context): string | undefined;
+  composeFrom(ctx: Context, parent: Context): string | undefined;
+  mount(ctx: Context, id: string): Promise<{ id: string }>;
 }
 const jsonOutput = {
   schema: { type: "string" } satisfies ValueSchemaSpec,
