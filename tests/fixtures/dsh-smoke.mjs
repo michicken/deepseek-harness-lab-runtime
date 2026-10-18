@@ -34,12 +34,31 @@ class ScriptedAdapter extends LlmAdapter {
     const toolErrors = content
       .filter((b) => b.type === "tool-result" && b.isError)
       .map((b) => b.content);
-    if (toolErrors.length)
+    const effortGateError = toolErrors.some((value) =>
+      JSON.stringify(value).includes("本轮不能以"),
+    );
+    if (toolErrors.length && !effortGateError)
       throw new Error(`fixture saw tool error: ${JSON.stringify(toolErrors)}`);
     let name, args;
-    if (!called.includes("lab_fixture_probe")) {
+    const probeCount = called.filter(
+      (value) => value === "lab_fixture_probe",
+    ).length;
+    if (
+      round < 2 &&
+      probeCount === 1 &&
+      !effortGateError &&
+      !called.includes("lab_round_report")
+    ) {
+      name = "lab_round_report";
+      args = {
+        action: "continue",
+        checkpoint: `Round ${round}: intentionally attempted an early handoff to verify the runtime floor.`,
+        evidence: ["proof.json"],
+        progress: true,
+      };
+    } else if (probeCount < 6) {
       name = "lab_fixture_probe";
-      args = {};
+      args = { attempt: probeCount + 1 };
     } else if (!called.includes("lab_finding")) {
       name = "lab_finding";
       args = {
@@ -90,7 +109,7 @@ export function apply(ctx) {
       name: "lab_fixture_probe",
       description:
         "Integration fixture: probe only the owned loopback target and save synthetic evidence.",
-      parameters: {},
+      parameters: { attempt: { type: "integer", required: true } },
       output: {
         schema: { type: "string" },
         render: (_a, v) => [{ type: "text", text: v }],

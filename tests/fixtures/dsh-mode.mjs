@@ -7,6 +7,7 @@ import {
   createUserMessage,
 } from "@deepseek-ai/dsh-llm";
 import { SessionId } from "@deepseek-ai/dsh-session";
+import { defineTool } from "@deepseek-ai/dsh-tools";
 
 export const name = "lab-mode-fixture";
 export const inject = ["labRuntime", "llm", "tools", "agentPresets", "agents"];
@@ -19,19 +20,38 @@ class ScriptedAdapter extends LlmAdapter {
       .map((block) => block.text)
       .join("\n");
     if (prompt.includes("你正在执行持久自主任务")) {
-      const args = {
-        action: "blocked",
-        checkpoint: "Lab Mission mode fixture ran in the owner Session.",
-        evidence: ["none"],
-        progress: false,
-      };
+      const called = options.messages
+        .flatMap((message) => message.content ?? [])
+        .filter((block) => block.type === "tool-call")
+        .map((block) => block.name);
+      const probes = called.filter((name) => name === "lab_mode_probe").length;
+      let name;
+      let args;
+      if (probes < 3) {
+        name = "lab_mode_probe";
+        args = { attempt: probes + 1 };
+      } else if (!called.includes("lab_checkpoint")) {
+        name = "lab_checkpoint";
+        args = {
+          checkpoint:
+            "Lab Mission mode fixture completed three owner-Session probes; next: verify the visible handoff.",
+        };
+      } else {
+        name = "lab_round_report";
+        args = {
+          action: "blocked",
+          checkpoint: "Lab Mission mode fixture ran in the owner Session.",
+          evidence: ["none"],
+          progress: false,
+        };
+      }
       const id = ToolCallId("mode-worker-report");
       yield { type: "block-start", index: 0, blockType: "tool-call" };
       yield {
         type: "tool-call-delta",
         index: 0,
         id,
-        name: "lab_round_report",
+        name,
         argumentsDelta: JSON.stringify(args),
       };
       yield {
@@ -40,7 +60,7 @@ class ScriptedAdapter extends LlmAdapter {
         block: {
           type: "tool-call",
           id,
-          name: "lab_round_report",
+          name,
           arguments: JSON.stringify(args),
         },
       };
@@ -59,6 +79,21 @@ class ScriptedAdapter extends LlmAdapter {
 
 export function apply(ctx) {
   ctx.llm.registerAdapter(["lab-mode-fixture"], new ScriptedAdapter());
+  ctx.tools.register(
+    defineTool({
+      name: "lab_mode_probe",
+      description:
+        "Integration fixture: perform one visible owner-Session probe.",
+      parameters: { attempt: { type: "integer", required: true } },
+      output: {
+        schema: { type: "string" },
+        render: (_a, value) => [{ type: "text", text: value }],
+      },
+      async execute(args) {
+        return JSON.stringify({ visibleSession: true, attempt: args.attempt });
+      },
+    }),
+  );
   const start = async () => {
     let handle;
     try {

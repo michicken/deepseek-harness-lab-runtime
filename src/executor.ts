@@ -21,13 +21,75 @@ const PLUGIN_SOURCE = { kind: "plugin:lab-runtime" } as unknown as {
   plugin: string;
 };
 
+/**
+ * A report is a handoff point, not a substitute for doing the round's work.
+ * These are deliberately small hard floors: the prompt describes the quality
+ * bar, while the runtime prevents a model from ending after one quick read.
+ */
+export const MIN_ROUND_WORK_UNITS = 6;
+export const MIN_WAIT_WORK_UNITS = 3;
+export const MIN_ROUND_CHECKPOINTS = 1;
+
+interface RoundActivity {
+  workUnits: number;
+  checkpointWrites: number;
+}
+
+interface VisibleRunState {
+  context: RoundContext;
+  activity: RoundActivity;
+  report?: RoundReport;
+  error?: Error;
+}
+
+const CONTROL_TOOLS = new Set([
+  "lab_checkpoint",
+  "lab_tasks",
+  "lab_finding",
+  "lab_round_report",
+  "lab_mission_start",
+  "lab_mission_status",
+  "lab_mission_control",
+]);
+
+/** Count successful research calls while excluding durable Mission bookkeeping. */
+function researchWorkWeight(name: string): number {
+  if (CONTROL_TOOLS.has(name)) return 0;
+  if (name === "subagent" || name === "subagent_fork") return 2;
+  if (/^(todo|ask_user|present|compact|schedule)$/i.test(name)) return 0;
+  return 1;
+}
+
+function enforceRoundEffort(
+  mode: RoundContext["lease"]["mission"]["mode"],
+  action: RoundReport["action"],
+  activity: RoundActivity,
+): void {
+  const requiredWork =
+    action === "continue" || action === "complete"
+      ? MIN_ROUND_WORK_UNITS
+      : action === "wait"
+        ? MIN_WAIT_WORK_UNITS
+        : 0;
+  if (requiredWork === 0) return;
+  const missing: string[] = [];
+  if (activity.workUnits < requiredWork)
+    missing.push(
+      `还需要至少 ${requiredWork - activity.workUnits} 个真实研究动作`,
+    );
+  if (activity.checkpointWrites < MIN_ROUND_CHECKPOINTS)
+    missing.push("还需要至少 1 次成功的 lab_checkpoint");
+  if (!missing.length) return;
+  const label = action === "wait" ? "wait" : action;
+  throw new Error(
+    `本轮不能以 ${label} 结束：只完成了 ${activity.workUnits} 个真实研究动作、${activity.checkpointWrites} 次 checkpoint；${missing.join("，")}。请继续执行源码/配置分析、实验/测试、证据核对或子 Agent 复核后再提交 lab_round_report。重复无意义调用不算实质进展。${mode === "continuous" && action === "wait" ? "只有确有外部依赖或授权缺口时才可以 wait。" : ""}`,
+  );
+}
+
 /** Uses public dsh Agent APIs for worker-mode and same-Session visible missions. */
 export class DshExecutor implements RoundExecutor {
   readonly workers = new Set<string>();
-  private readonly visibleRuns = new Map<
-    string,
-    { context: RoundContext; report?: RoundReport; error?: Error }
-  >();
+  private readonly visibleRuns = new Map<string, VisibleRunState>();
   private readonly visibleAgents = new Set<string>();
   constructor(
     private readonly ctx: Context,
@@ -50,6 +112,7 @@ export class DshExecutor implements RoundExecutor {
     let report: RoundReport | undefined;
     let turnError: Error | undefined;
     let handle: AgentHandle | undefined;
+    const activity: RoundActivity = { workUnits: 0, checkpointWrites: 0 };
     const store = this.store;
     const parent = this.ctx.agents.get(SessionId(context.lease.mission.owner));
     if (context.lease.mission.executionMode === "visible") {
@@ -126,6 +189,11 @@ export class DshExecutor implements RoundExecutor {
             );
             return reason === undefined ? next() : { kind: "deny", reason };
           });
+          agentCtx.on("tools/post-execute", async (exec, result, next) => {
+            if (!result.isError)
+              activity.workUnits += researchWorkWeight(exec.name);
+            return next();
+          });
           agentCtx.on("agent/pre-step", async (_payload, next) => {
             context.signal.throwIfAborted();
             this.store.assertLease(context.lease);
@@ -145,6 +213,7 @@ export class DshExecutor implements RoundExecutor {
               async execute(args) {
                 context.signal.throwIfAborted();
                 context.checkpoint(args.checkpoint);
+                activity.checkpointWrites += 1;
                 return JSON.stringify({ saved: true });
               },
             }),
@@ -273,8 +342,7 @@ export class DshExecutor implements RoundExecutor {
           agentCtx.tools.register(
             defineTool({
               name: "lab_round_report",
-              description:
-                "用持久交接结束本轮。continue 表示继续研究，wait 表示等待后自动重试；finite Mission 只有在证据充分时才能 complete。continuous Mission 永远不能 complete 或 blocked，遇到障碍也必须使用 wait；只有用户通过 lab_mission_control 手动暂停或停止。证据必须写明实际结果。本工具会结束当前轮次。",
+              description: `用持久交接结束本轮。提交前必须完成至少 ${MIN_ROUND_WORK_UNITS} 个成功的真实研究动作并成功调用 1 次 lab_checkpoint；只有确有外部依赖时才可 wait，wait 也至少需要 ${MIN_WAIT_WORK_UNITS} 个动作。continue 表示继续研究；finite Mission 只有在证据充分时才能 complete。continuous Mission 永远不能 complete 或 blocked，遇到障碍也必须使用 wait；只有用户通过 lab_mission_control 手动暂停或停止。证据必须写明实际结果。本工具会结束当前轮次。`,
               parameters: {
                 action: {
                   type: "string",
@@ -303,6 +371,11 @@ export class DshExecutor implements RoundExecutor {
                   (args.action === "complete" || args.action === "blocked")
                     ? "wait"
                     : args.action;
+                enforceRoundEffort(
+                  context.lease.mission.mode,
+                  action,
+                  activity,
+                );
                 if (
                   action === "complete" &&
                   (!args.evidence.some((e) => e.trim()) ||
@@ -384,12 +457,9 @@ export class DshExecutor implements RoundExecutor {
     if (this.visibleRuns.has(agent.id))
       throw new Error(`Visible mission already active in Session ${agent.id}`);
     this.installVisibleTools(agent);
-    const state: {
-      context: RoundContext;
-      report?: RoundReport;
-      error?: Error;
-    } = {
+    const state: VisibleRunState = {
       context,
+      activity: { workUnits: 0, checkpointWrites: 0 },
     };
     this.visibleRuns.set(agent.id, state);
     const onAbort = () =>
@@ -473,6 +543,12 @@ export class DshExecutor implements RoundExecutor {
       );
       return reason === undefined ? next() : { kind: "deny", reason };
     });
+    agent.ctx.on("tools/post-execute", async (exec, result, next) => {
+      const state = active(exec);
+      if (state && !result.isError)
+        state.activity.workUnits += researchWorkWeight(exec.name);
+      return next();
+    });
     agent.ctx.on("agent/pre-step", async (_payload, next) => {
       const state = this.visibleRuns.get(agent.id);
       if (!state) return next();
@@ -493,8 +569,9 @@ export class DshExecutor implements RoundExecutor {
         parameters: { checkpoint: { type: "string", required: true } },
         output: jsonOutput,
         async execute(args, exec) {
-          const { context } = contextFor(exec);
+          const { context, state } = contextFor(exec);
           context.checkpoint(args.checkpoint);
+          state.activity.checkpointWrites += 1;
           return JSON.stringify({ saved: true });
         },
       }),
@@ -614,8 +691,7 @@ export class DshExecutor implements RoundExecutor {
     agent.ctx.tools.register(
       defineTool({
         name: "lab_round_report",
-        description:
-          "结束本轮可见研究；运行时会在同一个 Session 中继续，所有工具调用和结果都会保留在当前轨迹。当前会话只绑定一个 Mission，用户后续消息是对该 Mission 的纠正或补充，不得创建第二个 Mission。continuous Mission 永远不能 complete 或 blocked，遇到障碍必须使用 wait；只有用户通过 lab_mission_control 手动暂停或停止。",
+        description: `结束本轮可见研究；提交前必须完成至少 ${MIN_ROUND_WORK_UNITS} 个成功的真实研究动作并成功调用 1 次 lab_checkpoint，wait 也至少需要 ${MIN_WAIT_WORK_UNITS} 个动作。运行时会在同一个 Session 中继续，所有工具调用和结果都会保留在当前轨迹。当前会话只绑定一个 Mission，用户后续消息是对该 Mission 的纠正或补充，不得创建第二个 Mission。continuous Mission 永远不能 complete 或 blocked，遇到障碍必须使用 wait；只有用户通过 lab_mission_control 手动暂停或停止。`,
         parameters: {
           action: {
             type: "string",
@@ -641,6 +717,11 @@ export class DshExecutor implements RoundExecutor {
             (args.action === "complete" || args.action === "blocked")
               ? "wait"
               : args.action;
+          enforceRoundEffort(
+            context.lease.mission.mode,
+            action,
+            state.activity,
+          );
           if (
             action === "complete" &&
             (!args.evidence.some((e) => e.trim()) ||
@@ -702,7 +783,8 @@ ${m.checkpoint || "（尚无 checkpoint）"}
 任务看板摘要：${JSON.stringify(tasks.slice(-20).map((t) => ({ id: t.id, title: t.title, status: t.status, revision: t.revision })))}
 
 使用工具和可验证实验取得具体进展。${visible ? "主会话必须继续在当前会话中统筹、实际研究、复核、更新 checkpoint，并让用户看到主会话的进展、工具调用和结果。允许按需创建任意数量的子 Agent 或子会话并行处理独立研究项，但不得让主会话停摆、只等待子代理或变成黑盒；子 Agent 不得创建第二个 Mission，所有结果必须回传当前主会话，由主会话验证并用简体中文向用户说明。" : "如果已安装相应 dsh 工具，可以在确有帮助时委托，并协调共享文件。"} 使用 lab_tasks 维护持久任务 DAG。在有意义的进展后调用 lab_checkpoint，避免崩溃丢失交接信息。${visible ? "之前的对话仍然可见，但重要事实必须与持久 checkpoint 和实际文件核对。" : "本轮使用新的会话；必须检查工作区和 checkpoint，不能假设上一轮对话仍然可用。"}
-必须以 lab_round_report 结束本轮。写明准确完成的工作、失败的方法、证据路径或结果以及下一步具体行动。${m.mode === "continuous" ? "这是常驻 Mission：不得使用 complete 或 blocked；遇到人类输入、授权或外部依赖问题时记录缺口并使用 wait，之后自动重试。不得自行调用 lab_mission_control；只有用户明确要求时才暂停或停止。" : "需要人类输入或授权时使用 blocked；只有证据充分时使用 complete。"} 外部目标暂不可用时使用 wait；不得循环制造活动或编造进展。没有工具证据时不得声称命令已经执行。轮次可能因崩溃而重放：外部修改必须幂等，重复前先检查已有结果。系统没有设置总 token 或轮次上限，但 provider 上下文、单轮运行时限和部署费用仍是真实边界。所有说明和报告使用简体中文；工具名、参数、枚举值、路径、命令和代码标识保留原文。`;
+每一轮都必须完成一个完整的研究工作单元后才能交接，不能只读取一两个文件、写几句总结或调用一次工具就停下。运行时硬性底线是：提交 lab_round_report 前至少完成 ${MIN_ROUND_WORK_UNITS} 个成功的非控制研究动作，并成功调用至少 1 次 lab_checkpoint；研究动作应覆盖有区别的源码/配置或数据流分析、可执行实验/测试、独立交叉核对、证据保存或子 Agent 复核中的至少两类。子 Agent 可以并行提高吞吐，但主会话必须继续自己的分析和验证。运行时计数只是最低门槛，重复无意义读取不能代替真实进展。只有确有外部依赖、授权缺口或暂时不可用的目标才可 wait，wait 也必须先完成至少 ${MIN_WAIT_WORK_UNITS} 个真实动作并记录阻塞证据；没有阻塞证据时继续研究，不得用 wait 偷懒。
+必须以 lab_round_report 结束本轮。写明准确完成的工作、失败的方法、证据路径或结果以及下一步具体行动。${m.mode === "continuous" ? "这是常驻 Mission：不得使用 complete 或 blocked；遇到人类输入、授权或外部依赖问题时记录缺口并使用 wait，之后自动重试。不得自行调用 lab_mission_control；只有用户明确要求时才暂停或停止。" : "需要人类输入或授权时使用 blocked；只有证据充分时使用 complete。"} 外部目标暂不可用时使用 wait；不得循环制造活动或编造进展。没有工具证据时不得声称命令已经执行。轮次可能因崩溃而重放：外部修改必须幂等，重复前先检查已有结果。系统没有设置总 token 或轮次上限，但 provider 上下文、单轮运行时限和部署费用仍是真实边界。所有说明和报告使用简体中文；工具名、参数、枚举值、文件路径、命令和代码标识保留原文。`;
 }
 
 const CLASH_PATTERN = /\b(clashx?|mihomo|clash[- ]?verge)\b/i;

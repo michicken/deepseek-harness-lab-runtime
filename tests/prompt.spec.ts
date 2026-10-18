@@ -17,6 +17,8 @@ describe("worker system prompt", () => {
     expect(prompt).toContain("授权范围、主机隔离与 Clash 禁区");
     expect(prompt).toContain("拥有完成整个研究目标所需的完整行动权限");
     expect(prompt).toContain("lab_round_report");
+    expect(prompt).toContain("至少要求六个成功的非控制研究动作");
+    expect(prompt).toContain("wait 也至少要求三个真实研究动作");
     expect(prompt).toContain("SHA-256");
     expect(prompt).not.toContain("System Prompt V3.0");
   });
