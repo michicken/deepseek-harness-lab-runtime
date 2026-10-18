@@ -30,6 +30,8 @@ npm test
 npm run typecheck
 ```
 
+`examples/github-actions-ci.yml` is the CI definition. Copy it to `.github/workflows/ci.yml` after granting the GitHub token `workflow` scope.
+
 ## Load into dsh
 
 Build the package, then add an absolute path to `lib/index.js` in a profile patch:
