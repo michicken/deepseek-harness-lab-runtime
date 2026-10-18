@@ -11,6 +11,8 @@ describe("worker system prompt", () => {
     expect(prompt).toContain("系统提示词 V3.1-LAB");
     expect(prompt).toContain("全程使用简体中文");
     expect(prompt).toContain("同一个 Agent Session 只绑定一个长期 Mission");
+    expect(prompt).toContain("允许按需创建任意数量的子 Agent 或子会话");
+    expect(prompt).toContain("主会话必须持续承担统筹、实际研究、复核");
     expect(prompt).toContain("长期无人值守运行协议");
     expect(prompt).toContain("授权范围、主机隔离与 Clash 禁区");
     expect(prompt).toContain("拥有完成整个研究目标所需的完整行动权限");

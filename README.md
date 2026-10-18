@@ -50,7 +50,7 @@ Build the package, then add an absolute path to `lib/index.js` in a profile patc
 
 ### Lab Mission (24h) mode
 
-`missionModePreset` is optional. When set, the first non-empty user message creates one never-ending `continuous` mission and the same Agent executes it with the ordinary session tools. Bash, file, web and Lab Runtime calls, results, checkpoints and follow-up rounds appear in that Session's transcript and trajectory. It does not create or hand work to a child Session. Later messages refine or correct the same Mission; they do not create another task. The continuous Mission never completes or blocks automatically and only an explicit human pause/stop can interrupt it.
+`missionModePreset` is optional. When set, the first non-empty user message creates one never-ending `continuous` mission and the same Agent executes it with the ordinary session tools. Bash, file, web and Lab Runtime calls, results, checkpoints and follow-up rounds appear in that Session's transcript and trajectory. The main Mission round is never silently handed to a child Session, but the main Agent may create as many subagents or child Sessions as useful for parallel research. The main Agent must keep working, verify their results, and report to the user in Simplified Chinese. Later messages refine or correct the same Mission; they do not create another task. The continuous Mission never completes or blocks automatically and only an explicit human pause/stop can interrupt it.
 
 `missionWorkerPreset` selects the Agent preset for missions explicitly run in background worker mode. It does not affect the visible `missionModePreset` Session, which uses its own preset and tools.
 
@@ -74,7 +74,7 @@ For dsh 0.1.x, create a preset directory such as `~/.dsh/.agent-presets/lab-miss
               includeRuntimeContext: false
               prefix: |
                 你直接在当前会话执行用户的实验室任务。
-                持久任务模式会在同一 Agent 和 Session 中持续运行；展示常规工具调用与结果，不要创建子会话或委托研究。
+                持久任务模式会在同一 Agent 和 Session 中持续运行；展示主会话的常规工具调用与结果。允许按需创建任意数量子 Agent 或子会话并行研究，但主会话必须继续工作、验证结果，并用简体中文与用户沟通和报告；子 Agent 不得创建第二个 Mission。
 ```
 
 The desktop app may require an explicit exact-version compatibility approval when the plugin was built for a different dsh release. The approval is stored in the profile's `compatibility.json`; only grant it for an exact plugin version and dsh version you have tested.

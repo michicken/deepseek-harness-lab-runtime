@@ -165,7 +165,8 @@ export class LabService extends Service {
     );
 
     // The first message in a Lab Mission session creates a visible mission.
-    // DshExecutor runs each round in this same Agent; no child Agent is spawned.
+    // DshExecutor runs the main round in this same Agent; the preset may still
+    // create parallel subagents, which must report back to this main Agent.
     ctx.on("agent/pre-step", async ({ agent, messages }, next) => {
       if (process.env.LAB_RUNTIME_DEBUG)
         console.error(
@@ -241,7 +242,7 @@ export class LabService extends Service {
               content: [
                 {
                   type: "text",
-                  text: `Mission ${mission.id} 已在当前同一会话中可见运行。目标：${goal}。请用简体中文简短告知用户已开始；后续研究轮次会在当前会话使用普通工具继续。这个会话只允许一个 Mission；用户后续消息视为对当前 Mission 的纠正或补充，不得委托、创建子会话、调用 lab_mission_start 或把纠正当成新任务。`,
+                  text: `Mission ${mission.id} 已在当前同一会话中可见运行。目标：${goal}。请用简体中文简短告知用户已开始；主研究轮次会在当前会话使用普通工具继续。这个会话只允许一个 Mission；用户后续消息视为对当前 Mission 的纠正或补充，不得调用 lab_mission_start 或把纠正当成新任务。可以按需创建子 Agent 并行研究，但主会话必须继续工作、验证结果并用简体中文向用户沟通和报告。`,
                 },
               ],
               source: PLUGIN_SOURCE,

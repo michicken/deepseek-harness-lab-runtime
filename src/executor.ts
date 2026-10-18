@@ -701,7 +701,7 @@ function buildPrompt(context: RoundContext, visible = false): string {
 ${m.checkpoint || "（尚无 checkpoint）"}
 任务看板摘要：${JSON.stringify(tasks.slice(-20).map((t) => ({ id: t.id, title: t.title, status: t.status, revision: t.revision })))}
 
-使用工具和可验证实验取得具体进展。${visible ? "不要委托、创建子智能体或创建子会话；直接在当前会话中工作，让用户在普通轨迹中看到进展、工具调用和结果。" : "如果已安装相应 dsh 工具，可以在确有帮助时委托，并协调共享文件。"} 使用 lab_tasks 维护持久任务 DAG。在有意义的进展后调用 lab_checkpoint，避免崩溃丢失交接信息。${visible ? "之前的对话仍然可见，但重要事实必须与持久 checkpoint 和实际文件核对。" : "本轮使用新的会话；必须检查工作区和 checkpoint，不能假设上一轮对话仍然可用。"}
+使用工具和可验证实验取得具体进展。${visible ? "主会话必须继续在当前会话中统筹、实际研究、复核、更新 checkpoint，并让用户看到主会话的进展、工具调用和结果。允许按需创建任意数量的子 Agent 或子会话并行处理独立研究项，但不得让主会话停摆、只等待子代理或变成黑盒；子 Agent 不得创建第二个 Mission，所有结果必须回传当前主会话，由主会话验证并用简体中文向用户说明。" : "如果已安装相应 dsh 工具，可以在确有帮助时委托，并协调共享文件。"} 使用 lab_tasks 维护持久任务 DAG。在有意义的进展后调用 lab_checkpoint，避免崩溃丢失交接信息。${visible ? "之前的对话仍然可见，但重要事实必须与持久 checkpoint 和实际文件核对。" : "本轮使用新的会话；必须检查工作区和 checkpoint，不能假设上一轮对话仍然可用。"}
 必须以 lab_round_report 结束本轮。写明准确完成的工作、失败的方法、证据路径或结果以及下一步具体行动。${m.mode === "continuous" ? "这是常驻 Mission：不得使用 complete 或 blocked；遇到人类输入、授权或外部依赖问题时记录缺口并使用 wait，之后自动重试。不得自行调用 lab_mission_control；只有用户明确要求时才暂停或停止。" : "需要人类输入或授权时使用 blocked；只有证据充分时使用 complete。"} 外部目标暂不可用时使用 wait；不得循环制造活动或编造进展。没有工具证据时不得声称命令已经执行。轮次可能因崩溃而重放：外部修改必须幂等，重复前先检查已有结果。系统没有设置总 token 或轮次上限，但 provider 上下文、单轮运行时限和部署费用仍是真实边界。所有说明和报告使用简体中文；工具名、参数、枚举值、路径、命令和代码标识保留原文。`;
 }
 
