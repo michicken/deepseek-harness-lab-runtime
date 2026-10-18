@@ -52,6 +52,8 @@ Build the package, then add an absolute path to `lib/index.js` in a profile patc
 
 `missionModePreset` is optional. When set, the first non-empty user message creates one never-ending `continuous` mission and the same Agent executes it with the ordinary session tools. Bash, file, web and Lab Runtime calls, results, checkpoints and follow-up rounds appear in that Session's transcript and trajectory. The main Mission round is never silently handed to a child Session, but the main Agent may create as many subagents or child Sessions as useful for parallel research. The main Agent must keep working, verify their results, and report to the user in Simplified Chinese. Later messages refine or correct the same Mission; they do not create another task. The continuous Mission never completes or blocks automatically and only an explicit human pause/stop can interrupt it.
 
+The desktop preset exposes `subagent`, `subagent_fork`, and agent-control tools for parallel work. It leaves workflow/Ralph tools out because that optional `workflowEngine` is not installed in this desktop deployment; missing optional workflow services must never prevent the main session from resuming.
+
 `missionWorkerPreset` selects the Agent preset for missions explicitly run in background worker mode. It does not affect the visible `missionModePreset` Session, which uses its own preset and tools.
 
 The selected session's working directory is the mission workspace. It must be an existing absolute directory, but the runtime does not restrict it to a configured workspace allowlist. File writes remain limited to that mission workspace by the host guard. Target origins are still restricted by `allowedTargets`.
