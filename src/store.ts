@@ -207,6 +207,35 @@ export class MissionStore {
       this.event(m.id, "checkpoint", {});
     });
   }
+  /**
+   * Persist one visible continuous sub-stage without releasing its lease.
+   * The owner Session stays in the same live turn and immediately continues
+   * with the next tool call; only explicit human control may stop it.
+   */
+  recordCycle(lease: Lease, report: RoundReport, now = Date.now()): Mission {
+    checkText(report.checkpoint, "checkpoint", 16000);
+    return this.tx(() => {
+      const m = this.assertLease(lease, now);
+      if (m.mode !== "continuous" || m.executionMode !== "visible")
+        throw new Error(
+          "recordCycle is only valid for visible continuous Missions",
+        );
+      m.checkpoint = report.checkpoint;
+      m.round++;
+      m.failures = 0;
+      m.lastError = "";
+      m.stagnantRounds = report.progress ? 0 : m.stagnantRounds + 1;
+      m.status = "running";
+      m.updatedAt = now;
+      m.revision++;
+      this.save(m);
+      this.event(m.id, "cycle-settled", {
+        ...report,
+        action: "continue",
+      });
+      return m;
+    });
+  }
   settle(
     lease: Lease,
     report: RoundReport,

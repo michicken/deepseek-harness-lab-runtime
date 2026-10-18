@@ -1,6 +1,6 @@
 # DeepSeek Harness Lab Runtime
 
-Durable mission runtime for authorized security research. The V3.1-LAB research prompt adds long-running checkpoints, idempotent replay, target authorization, and evidence-hash rules. `Lab Mission (24h)` runs the research directly inside the visible owner Session: normal tools, calls, outputs, checkpoints, and later rounds stay in its transcript and trajectory. Missions explicitly started in worker mode remain available for separate worker Sessions.
+Durable mission runtime for authorized security research. The V3.2-LAB research prompt adds non-stopping continuous execution, long-running checkpoints, idempotent replay, target authorization, and evidence-hash rules. `Lab Mission (24h)` runs the research directly inside the visible owner Session: normal tools, calls, outputs, checkpoints, and later rounds stay in its transcript and trajectory. Missions explicitly started in worker mode remain available for separate worker Sessions.
 
 Mission state deliberately lives outside `dsh-jobs-local`, because that registry is process-local. SQLite WAL plus `BEGIN IMMEDIATE` gives transactional claims, fenced leases, heartbeat renewal, and crash recovery across daemon processes.
 
@@ -11,18 +11,18 @@ Mission state deliberately lives outside `dsh-jobs-local`, because that registry
 - `lab_mission_control`: pause, resume, or permanently stop an owned mission.
 - `Lab Mission (24h)` mode: the first user message becomes one never-ending `continuous` mission; the same Agent performs the research with its ordinary session tools. Later user messages are corrections and guidance for that Mission, never new Missions.
 - Visible mission tools: `lab_checkpoint`, `lab_tasks`, `lab_finding`, and `lab_round_report` run in the owner Session and appear in its trajectory.
-- Round handoff has a runtime effort floor: `continue`/`complete` require six successful non-control research actions plus a checkpoint; `wait` requires three actions plus a checkpoint. An early report is rejected and the same Session must continue.
-- A visible `continuous` wake runs at least three sequential research cycles in the same owner Session before yielding to the scheduler; `continue` is a sub-stage handoff, and automatic waits are capped at 60 seconds.
-- Automatic round scheduling resumes in the same Session. A visible mission waits unclaimed until its owner Session is loaded; it is never silently moved to a child Session.
+- Round handoff has a runtime effort floor: a report requires six successful non-control research actions plus a checkpoint. An early report is rejected and the same Session must continue.
+- A visible `continuous` Mission keeps running in the same owner Session and the same live turn. `lab_round_report` records a checkpoint and immediately returns to the next tool call; it is not a turn-ending signal. `wait`, `complete`, `blocked`, `ask_user_question`, and turns that end without a tool call are rejected or steered back into work. Only explicit human pause/stop ends it.
+- A visible mission remains in the same owner Session and is never silently moved to a child Session. A visible mission waits unclaimed until its owner Session is loaded.
 - Explicit worker-mode missions remain available for users who choose a separate Session.
 - Durable checkpoints and a SQLite task DAG carry mission state across rounds.
 - SQLite WAL state, `BEGIN IMMEDIATE` claims, fenced leases, heartbeat renewal, crash recovery.
 - Evidence-bound findings: workspace path, SHA-256, and static/lab/impact classification.
 - Session-selected workspace and explicit target origins; loopback-only by default.
 - Bounded event history and checkpoint size; replay-safe external work guidance.
-- Stagnation detection and a failure circuit breaker for `finite` missions; `continuous` missions convert blockers and failures into waits and keep retrying until human control.
+- Stagnation detection and a failure circuit breaker for `finite` missions; visible `continuous` missions convert blockers and failures into another work cycle until human control.
 
-The plugin does not claim infinite tokens. Each model request remains bounded by the provider and context window; the mission continues across finite turns using checkpoints and the workspace as durable working memory.
+The plugin does not claim infinite tokens. Each model request remains bounded by the provider and context window; a visible continuous Mission keeps advancing inside one long-running owner turn, using checkpoints and the workspace as durable working memory.
 
 ## Development
 
@@ -78,14 +78,14 @@ For dsh 0.1.x, create a preset directory such as `~/.dsh/.agent-presets/lab-miss
               includeRuntimeContext: false
               prefix: |
                 你直接在当前会话执行用户的实验室任务。
-                持久任务模式会在同一 Agent 和 Session 中持续运行；展示主会话的常规工具调用与结果。允许按需创建任意数量子 Agent 或子会话并行研究，但主会话必须继续工作、验证结果，并用简体中文与用户沟通和报告；子 Agent 不得创建第二个 Mission。
+                持久任务模式会在同一 Agent、Session 和持续回合中运行；每次面向用户输出后都必须继续调用真实工具，禁止宣告开始、输出计划或总结后停下，禁止 wait、ask_user_question、schedule 或任何自行暂停/结束。展示主会话的常规工具调用与结果。允许按需创建任意数量子 Agent 或子会话并行研究，但主会话必须继续工作、验证结果，并用简体中文与用户沟通和报告；子 Agent 不得创建第二个 Mission。只有用户通过 lab_mission_control 手动暂停或停止时才允许中断。
 ```
 
 The desktop app may require an explicit exact-version compatibility approval when the plugin was built for a different dsh release. The approval is stored in the profile's `compatibility.json`; only grant it for an exact plugin version and dsh version you have tested.
 
 Run the profile under an external supervisor such as launchd, systemd, or a container manager. After a daemon restart the new process claims expired leases automatically; no human re-entry is needed. The persisted lease prevents a second runtime from taking over while the previous owner is healthy.
 
-The default mission prompt is version `V3.1-LAB`, loaded from `assets/security-research-system-prompt.txt` and injected as an agent-scoped system prompt section. See `docs/security-lab-operations.md` for isolation and lifecycle requirements.
+The default mission prompt is version `V3.2-LAB`, loaded from `assets/security-research-system-prompt.txt` and injected as an agent-scoped system prompt section. See `docs/security-lab-operations.md` for isolation and lifecycle requirements.
 
 ## Operational boundary
 

@@ -88,10 +88,21 @@ export class MissionRuntime {
         controller.abort(error);
       }
     }, this.options.heartbeatMs);
-    const timeout = setTimeout(
-      () => controller.abort(new Error("Round timeout; retry from checkpoint")),
-      this.options.roundTimeoutMs,
-    );
+    // A visible continuous Mission deliberately owns the owner Session for as
+    // long as the human leaves it running. Its lease is renewed by the
+    // heartbeat; a fixed per-round deadline would silently break the 24h
+    // guarantee. Finite and worker Missions keep the watchdog.
+    const timeout =
+      lease.mission.executionMode === "visible" &&
+      lease.mission.mode === "continuous"
+        ? undefined
+        : setTimeout(
+            () =>
+              controller.abort(
+                new Error("Round timeout; retry from checkpoint"),
+              ),
+            this.options.roundTimeoutMs,
+          );
     try {
       const report = await this.executor.run({
         lease,
@@ -145,7 +156,7 @@ export class MissionRuntime {
       }
     } finally {
       clearInterval(heartbeat);
-      clearTimeout(timeout);
+      if (timeout !== undefined) clearTimeout(timeout);
     }
   }
 }

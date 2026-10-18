@@ -15,7 +15,7 @@ class ScriptedAdapter extends LlmAdapter {
       .map((b) => b.text)
       .join("\n");
     if (
-      !systemText.includes("系统提示词 V3.1-LAB") ||
+      !systemText.includes("系统提示词 V3.2-LAB") ||
       !systemText.includes("长期无人值守运行协议")
     )
       throw new Error(

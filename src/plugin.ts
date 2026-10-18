@@ -90,11 +90,11 @@ export class LabService extends Service {
       );
     const systemPrompt = readFileSync(promptFile, "utf8").trim();
     if (
-      !systemPrompt.includes("系统提示词 V3.1-LAB") ||
+      !systemPrompt.includes("系统提示词 V3.2-LAB") ||
       !systemPrompt.includes("长期无人值守运行协议")
     )
       throw new Error(
-        "promptFile is not the compatible V3.1-LAB security research prompt",
+        "promptFile is not the compatible V3.2-LAB security research prompt",
       );
     this.executor = new DshExecutor(
       ctx,
@@ -205,7 +205,7 @@ export class LabService extends Service {
                 content: [
                   {
                     type: "text",
-                    text: "已收到当前 Mission 的继续或纠正，已立即唤醒下一研究轮次。继续使用同一个 Mission，在当前会话中完成实质分析、实验和证据核对；不要创建第二个 Mission。",
+                    text: "已收到当前 Mission 的继续或纠正，已立即唤醒下一研究轮次。继续使用同一个 Mission，在当前会话中完成实质分析、实验和证据核对；不要创建第二个 Mission，不要等待、询问用户或在未调用工具时停止。",
                   },
                 ],
                 source: PLUGIN_SOURCE,
@@ -269,7 +269,7 @@ export class LabService extends Service {
               content: [
                 {
                   type: "text",
-                  text: `Mission ${mission.id} 已在当前同一会话中可见运行。目标：${goal}。请用简体中文简短告知用户已开始；主研究轮次会在当前会话使用普通工具继续。这个会话只允许一个 Mission；用户后续消息视为对当前 Mission 的纠正或补充，不得调用 lab_mission_start 或把纠正当成新任务。可以按需创建子 Agent 并行研究，但主会话必须继续工作、验证结果并用简体中文向用户沟通和报告。`,
+                  text: `Mission ${mission.id} 已在当前同一会话中可见运行。目标：${goal}。直接开始研究；不要只声明开始后停下，不要询问用户，不要等待，本轮必须继续调用真实工具，直到 Mission 进入运行循环。这个会话只允许一个 Mission；用户后续消息视为对当前 Mission 的纠正或补充，不得调用 lab_mission_start 或把纠正当成新任务。可以按需创建子 Agent 并行研究，但主会话必须继续工作、验证结果并用简体中文向用户沟通和报告。`,
                 },
               ],
               source: PLUGIN_SOURCE,

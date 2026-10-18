@@ -130,6 +130,24 @@ describe("transactional mission store", () => {
     expect(store.get(m.id).status).not.toBe("blocked");
     expect(store.get(m.id).nextRunAt).toBeGreaterThan(Date.now() + 59000);
   });
+  it("records a visible continuous cycle without releasing its lease", () => {
+    const { store } = setup();
+    const m = store.create({
+      ...input,
+      mode: "continuous",
+      executionMode: "visible",
+    });
+    const lease = store.claim("owner", 10000)!;
+    const next = store.recordCycle(lease, report());
+    expect(next.status).toBe("running");
+    expect(next.round).toBe(1);
+    expect(next.checkpoint).toBe(report().checkpoint);
+    expect(store.events(m.id)[0]).toMatchObject({
+      kind: "cycle-settled",
+      data: expect.stringContaining('"action":"continue"'),
+    });
+    expect(() => store.assertLease(lease)).not.toThrow();
+  });
   it("wakes a waiting mission immediately for owner guidance", () => {
     const { store } = setup();
     const m = store.create({

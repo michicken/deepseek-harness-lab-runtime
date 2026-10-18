@@ -91,6 +91,7 @@ it.skipIf(!existsSync(bin))(
             ...process.env,
             DSH_HOME: dshHome,
             LAB_WORKSPACE: realpathSync(workspace),
+            LAB_MIN_VISIBLE_ROUND_WORK_UNITS: "3",
           },
           stdio: ["ignore", "pipe", "pipe"],
         },
@@ -113,8 +114,21 @@ it.skipIf(!existsSync(bin))(
       const result = JSON.parse(line!);
       expect(result.mission.goal).toContain("Audit the local lab fixture");
       expect(result.mission.executionMode).toBe("visible");
+      expect(result.mission.round).toBeGreaterThanOrEqual(1);
       expect(result.hasLaunchAcknowledgment).toBe(true);
       expect(result.visibleRoundInOwner).toBe(true);
+      expect(result.turnStoppingSteered).toBe(true);
+      expect(result.waitRejected).toBe(true);
+      expect(
+        result.events.some(
+          (event: { kind: string }) => event.kind === "cycle-settled",
+        ),
+      ).toBe(true);
+      expect(
+        result.events.some(
+          (event: { kind: string }) => event.kind === "round-settled",
+        ),
+      ).toBe(false);
       expect(
         result.events.some(
           (event: { kind: string }) => event.kind === "session",

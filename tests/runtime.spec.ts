@@ -52,6 +52,40 @@ describe("scheduler", () => {
     expect(store.claim("competitor", 100)).toBeUndefined();
     await until(() => store.get(m.id).status === "completed");
   });
+  it("does not apply a fixed round timeout to visible continuous missions", async () => {
+    let started = false;
+    let aborted = false;
+    const { store, runtime } = setup(
+      {
+        async run(c) {
+          started = true;
+          await new Promise<void>((resolve) => {
+            c.signal.addEventListener(
+              "abort",
+              () => {
+                aborted = true;
+                resolve();
+              },
+              { once: true },
+            );
+          });
+          return report();
+        },
+      },
+      { roundTimeoutMs: 10, heartbeatMs: 10, leaseMs: 100 },
+    );
+    const m = store.create({
+      ...input,
+      mode: "continuous",
+      executionMode: "visible",
+    });
+    runtime.start();
+    await until(() => started);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(store.get(m.id).status).toBe("running");
+    await runtime.stop();
+    expect(aborted).toBe(true);
+  });
   it("retries transient failures and opens a circuit on repeated failure", async () => {
     let calls = 0;
     const { store, runtime } = setup(
