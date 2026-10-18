@@ -29,6 +29,10 @@ const PLUGIN_SOURCE = { kind: "plugin:lab-runtime" } as unknown as {
 export const MIN_ROUND_WORK_UNITS = 6;
 export const MIN_WAIT_WORK_UNITS = 3;
 export const MIN_ROUND_CHECKPOINTS = 1;
+/** One scheduler wake must contain multiple research cycles before yielding. */
+export const MIN_AUTONOMOUS_CYCLES = 3;
+/** A continuous Mission may retry a real blocker, but must not sleep for hours. */
+export const MAX_CONTINUOUS_WAIT_MS = 60_000;
 
 interface RoundActivity {
   workUnits: number;
@@ -58,6 +62,11 @@ function researchWorkWeight(name: string): number {
   if (name === "subagent" || name === "subagent_fork") return 2;
   if (/^(todo|ask_user|present|compact|schedule)$/i.test(name)) return 0;
   return 1;
+}
+
+function resetActivity(activity: RoundActivity): void {
+  activity.workUnits = 0;
+  activity.checkpointWrites = 0;
 }
 
 function enforceRoundEffort(
@@ -352,7 +361,7 @@ export class DshExecutor implements RoundExecutor {
           agentCtx.tools.register(
             defineTool({
               name: "lab_round_report",
-              description: `用持久交接结束本轮。提交前必须完成至少 ${MIN_ROUND_WORK_UNITS} 个成功的真实研究动作并成功调用 1 次 lab_checkpoint；只有确有外部依赖时才可 wait，wait 也至少需要 ${MIN_WAIT_WORK_UNITS} 个动作。continue 表示继续研究；finite Mission 只有在证据充分时才能 complete。continuous Mission 永远不能 complete 或 blocked，遇到障碍也必须使用 wait；只有用户通过 lab_mission_control 手动暂停或停止。证据必须写明实际结果。本工具会结束当前轮次。`,
+              description: `用持久交接结束当前子阶段。提交前必须完成至少 ${MIN_ROUND_WORK_UNITS} 个成功的真实研究动作并成功调用 1 次 lab_checkpoint；只有确有外部依赖时才可 wait，wait 也至少需要 ${MIN_WAIT_WORK_UNITS} 个动作。一次 continuous 唤醒至少连续执行 ${MIN_AUTONOMOUS_CYCLES} 个研究周期，continue 只会进入下一个周期，不会让 Mission 停止。finite Mission 只有在证据充分时才能 complete。continuous Mission 永远不能 complete 或 blocked，遇到障碍也必须使用 wait；只有用户通过 lab_mission_control 手动暂停或停止。证据必须写明实际结果。`,
               parameters: {
                 action: {
                   type: "string",
@@ -394,13 +403,17 @@ export class DshExecutor implements RoundExecutor {
                   throw new Error(
                     "Completion needs evidence and all declared tasks done",
                   );
-                const waitMs = args.wait_ms ?? 60000;
+                const requestedWaitMs = args.wait_ms ?? 60000;
                 if (
-                  !Number.isSafeInteger(waitMs) ||
-                  waitMs < 1000 ||
-                  waitMs > 7 * 86400000
+                  !Number.isSafeInteger(requestedWaitMs) ||
+                  requestedWaitMs < 1000 ||
+                  requestedWaitMs > 7 * 86400000
                 )
                   throw new Error("wait_ms must be between 1000 and 604800000");
+                const waitMs =
+                  context.lease.mission.mode === "continuous"
+                    ? Math.min(requestedWaitMs, MAX_CONTINUOUS_WAIT_MS)
+                    : requestedWaitMs;
                 if (
                   args.evidence.length > 32 ||
                   args.evidence.some((e) => e.length > 2000)
@@ -423,10 +436,11 @@ export class DshExecutor implements RoundExecutor {
       context.signal.addEventListener("abort", onAbort, { once: true });
       context.signal.throwIfAborted();
       const m = context.lease.mission;
+      resetActivity(activity);
       handle.agent.followup(
         createUserMessage({
           source: PLUGIN_SOURCE,
-          content: [{ type: "text", text: buildPrompt(context) }],
+          content: [{ type: "text", text: buildPrompt(context, false, 1) }],
         }),
       );
       await handle.agent.whenIdle();
@@ -477,43 +491,60 @@ export class DshExecutor implements RoundExecutor {
     try {
       context.signal.addEventListener("abort", onAbort, { once: true });
       context.signal.throwIfAborted();
-      agent.followup(
-        createUserMessage({
-          source: PLUGIN_SOURCE,
-          content: [{ type: "text", text: buildPrompt(context, true) }],
-        }),
-      );
-      await agent.whenIdle();
-      context.signal.throwIfAborted();
-      if (state.error) throw state.error;
-      const end = agent.session
-        .snapshotEvents()
-        .findLast((event) => event.type === "turn/end");
-      if (
-        end?.type === "turn/end" &&
-        end.data.reason.kind === "aborted" &&
-        end.data.reason.reason.kind === "user" &&
-        state.report === undefined
-      ) {
-        return {
-          action: "wait",
-          checkpoint:
-            context.lease.mission.checkpoint ||
-            "本轮可见研究被用户打断，尚未产生新的 checkpoint；下一轮从当前会话轨迹继续。",
-          evidence: ["用户打断了可见研究轮次，不能据此推断为执行失败。"],
-          progress: false,
-          waitMs: 60000,
-        };
+      const mission = context.lease.mission;
+      for (let cycle = 0; ; cycle += 1) {
+        resetActivity(state.activity);
+        state.report = undefined;
+        state.error = undefined;
+        agent.followup(
+          createUserMessage({
+            source: PLUGIN_SOURCE,
+            content: [
+              {
+                type: "text",
+                text: buildPrompt(context, true, cycle + 1),
+              },
+            ],
+          }),
+        );
+        await agent.whenIdle();
+        context.signal.throwIfAborted();
+        if (state.error) throw state.error;
+        const end = agent.session
+          .snapshotEvents()
+          .findLast((event) => event.type === "turn/end");
+        if (
+          end?.type === "turn/end" &&
+          end.data.reason.kind === "aborted" &&
+          end.data.reason.reason.kind === "user" &&
+          state.report === undefined
+        ) {
+          return {
+            action: "wait",
+            checkpoint:
+              context.lease.mission.checkpoint ||
+              "本轮可见研究被用户打断，尚未产生新的 checkpoint；下一轮从当前会话轨迹继续。",
+            evidence: ["用户打断了可见研究轮次，不能据此推断为执行失败。"],
+            progress: false,
+            waitMs: 60000,
+          };
+        }
+        if (end?.type === "turn/end" && end.data.reason.kind !== "completed")
+          throw new Error(
+            `Visible dsh turn did not complete: ${JSON.stringify(end.data.reason)}`,
+          );
+        if (!state.report)
+          throw new Error(
+            `Visible Session ended without lab_round_report (${mission.id})`,
+          );
+        if (
+          mission.mode === "continuous" &&
+          cycle + 1 < MIN_AUTONOMOUS_CYCLES &&
+          (state.report.action === "continue" || state.report.action === "wait")
+        )
+          continue;
+        return state.report;
       }
-      if (end?.type === "turn/end" && end.data.reason.kind !== "completed")
-        throw new Error(
-          `Visible dsh turn did not complete: ${JSON.stringify(end.data.reason)}`,
-        );
-      if (!state.report)
-        throw new Error(
-          `Visible Session ended without lab_round_report (${context.lease.mission.id})`,
-        );
-      return state.report;
     } finally {
       context.signal.removeEventListener("abort", onAbort);
       if (this.visibleRuns.get(agent.id) === state)
@@ -701,7 +732,7 @@ export class DshExecutor implements RoundExecutor {
     agent.ctx.tools.register(
       defineTool({
         name: "lab_round_report",
-        description: `结束本轮可见研究；提交前必须完成至少 ${MIN_ROUND_WORK_UNITS} 个成功的真实研究动作并成功调用 1 次 lab_checkpoint，wait 也至少需要 ${MIN_WAIT_WORK_UNITS} 个动作。运行时会在同一个 Session 中继续，所有工具调用和结果都会保留在当前轨迹。当前会话只绑定一个 Mission，用户后续消息是对该 Mission 的纠正或补充，不得创建第二个 Mission。continuous Mission 永远不能 complete 或 blocked，遇到障碍必须使用 wait；只有用户通过 lab_mission_control 手动暂停或停止。`,
+        description: `结束当前子阶段；提交前必须完成至少 ${MIN_ROUND_WORK_UNITS} 个成功的真实研究动作并成功调用 1 次 lab_checkpoint，wait 也至少需要 ${MIN_WAIT_WORK_UNITS} 个动作。一次 continuous 唤醒至少连续执行 ${MIN_AUTONOMOUS_CYCLES} 个研究周期，continue 只会立即进入下一个周期。运行时会在同一个 Session 中继续，所有工具调用和结果都会保留在当前轨迹。当前会话只绑定一个 Mission，用户后续消息是对该 Mission 的纠正或补充，不得创建第二个 Mission。continuous Mission 永远不能 complete 或 blocked，遇到障碍必须使用 wait；只有用户通过 lab_mission_control 手动暂停或停止。`,
         parameters: {
           action: {
             type: "string",
@@ -740,13 +771,17 @@ export class DshExecutor implements RoundExecutor {
             throw new Error(
               "Completion needs evidence and all declared tasks done",
             );
-          const waitMs = args.wait_ms ?? 60000;
+          const requestedWaitMs = args.wait_ms ?? 60000;
           if (
-            !Number.isSafeInteger(waitMs) ||
-            waitMs < 1000 ||
-            waitMs > 7 * 86400000
+            !Number.isSafeInteger(requestedWaitMs) ||
+            requestedWaitMs < 1000 ||
+            requestedWaitMs > 7 * 86400000
           )
             throw new Error("wait_ms must be between 1000 and 604800000");
+          const waitMs =
+            context.lease.mission.mode === "continuous"
+              ? Math.min(requestedWaitMs, MAX_CONTINUOUS_WAIT_MS)
+              : requestedWaitMs;
           if (
             args.evidence.length > 32 ||
             args.evidence.some((e) => e.length > 2000)
@@ -778,10 +813,19 @@ const jsonOutput = {
     { type: "text" as const, text: value },
   ],
 } as const;
-function buildPrompt(context: RoundContext, visible = false): string {
+function buildPrompt(
+  context: RoundContext,
+  visible = false,
+  cycle = 1,
+): string {
   const m = context.lease.mission;
   const tasks = context.tasks.list();
+  const cycleNotice =
+    m.mode === "continuous"
+      ? `这是本次调度唤醒中的连续研究周期 ${cycle}/${MIN_AUTONOMOUS_CYCLES}；前一个周期的 lab_round_report 只是子阶段交接，不能视为本次工作结束。`
+      : "";
   return `你正在执行持久自主任务的第 ${m.round + 1} 轮${visible ? "，并且直接运行在用户当前的 Agent 会话中" : ""}。
+${cycleNotice}
 当前会话只绑定一个 Mission。第一条用户消息定义目标；后续用户消息都是对这个 Mission 的纠正、补充、优先级调整或范围说明，不是新任务。把它们合并到当前计划、checkpoint、任务看板和下一步行动中，不要调用 lab_mission_start，不要创建第二个 Mission，也不要把纠正内容单独登记成任务。只有用户明确要求暂停、恢复或停止时才调用 lab_mission_control。
 目标：${m.goal}
 模式：${m.mode}。${m.mode === "continuous" ? "该目标会持续存在；没有可执行工作时，使用 wait 并设置合理等待时间。" : "只有证据证明目标已经完成时才结束。"}
@@ -793,7 +837,7 @@ ${m.checkpoint || "（尚无 checkpoint）"}
 任务看板摘要：${JSON.stringify(tasks.slice(-20).map((t) => ({ id: t.id, title: t.title, status: t.status, revision: t.revision })))}
 
 使用工具和可验证实验取得具体进展。${visible ? "主会话必须继续在当前会话中统筹、实际研究、复核、更新 checkpoint，并让用户看到主会话的进展、工具调用和结果。允许按需创建任意数量的子 Agent 或子会话并行处理独立研究项，但不得让主会话停摆、只等待子代理或变成黑盒；子 Agent 不得创建第二个 Mission，所有结果必须回传当前主会话，由主会话验证并用简体中文向用户说明。" : "如果已安装相应 dsh 工具，可以在确有帮助时委托，并协调共享文件。"} 使用 lab_tasks 维护持久任务 DAG。在有意义的进展后调用 lab_checkpoint，避免崩溃丢失交接信息。${visible ? "之前的对话仍然可见，但重要事实必须与持久 checkpoint 和实际文件核对。" : "本轮使用新的会话；必须检查工作区和 checkpoint，不能假设上一轮对话仍然可用。"}
-每一轮都必须完成一个完整的研究工作单元后才能交接，不能只读取一两个文件、写几句总结或调用一次工具就停下。运行时硬性底线是：提交 lab_round_report 前至少完成 ${MIN_ROUND_WORK_UNITS} 个成功的非控制研究动作，并成功调用至少 1 次 lab_checkpoint；研究动作应覆盖有区别的源码/配置或数据流分析、可执行实验/测试、独立交叉核对、证据保存或子 Agent 复核中的至少两类。子 Agent 可以并行提高吞吐，但主会话必须继续自己的分析和验证。运行时计数只是最低门槛，重复无意义读取不能代替真实进展。只有确有外部依赖、授权缺口或暂时不可用的目标才可 wait，wait 也必须先完成至少 ${MIN_WAIT_WORK_UNITS} 个真实动作并记录阻塞证据；没有阻塞证据时继续研究，不得用 wait 偷懒。
+每一轮都必须完成一个完整的研究工作单元后才能交接，不能只读取一两个文件、写几句总结或调用一次工具就停下。运行时硬性底线是：提交 lab_round_report 前至少完成 ${MIN_ROUND_WORK_UNITS} 个成功的非控制研究动作，并成功调用至少 1 次 lab_checkpoint；研究动作应覆盖有区别的源码/配置或数据流分析、可执行实验/测试、独立交叉核对、证据保存或子 Agent 复核中的至少两类。子 Agent 可以并行提高吞吐，但主会话必须继续自己的分析和验证。运行时计数只是最低门槛，重复无意义读取不能代替真实进展。本次 continuous 唤醒必须连续完成至少 ${MIN_AUTONOMOUS_CYCLES} 个研究周期；在第 ${MIN_AUTONOMOUS_CYCLES} 个周期之前，continue 或 wait 都会被主会话自动接成下一个周期。只有确有外部依赖、授权缺口或暂时不可用的目标才可 wait，wait 也必须先完成至少 ${MIN_WAIT_WORK_UNITS} 个真实动作并记录阻塞证据；没有阻塞证据时继续研究，不得用 wait 偷懒。连续 Mission 的 wait 最长只会自动等待 ${MAX_CONTINUOUS_WAIT_MS / 1000} 秒，之后重新检查。
 必须以 lab_round_report 结束本轮。写明准确完成的工作、失败的方法、证据路径或结果以及下一步具体行动。${m.mode === "continuous" ? "这是常驻 Mission：不得使用 complete 或 blocked；遇到人类输入、授权或外部依赖问题时记录缺口并使用 wait，之后自动重试。不得自行调用 lab_mission_control；只有用户明确要求时才暂停或停止。" : "需要人类输入或授权时使用 blocked；只有证据充分时使用 complete。"} 外部目标暂不可用时使用 wait；不得循环制造活动或编造进展。没有工具证据时不得声称命令已经执行。轮次可能因崩溃而重放：外部修改必须幂等，重复前先检查已有结果。系统没有设置总 token 或轮次上限，但 provider 上下文、单轮运行时限和部署费用仍是真实边界。所有说明和报告使用简体中文；工具名、参数、枚举值、文件路径、命令和代码标识保留原文。`;
 }
 

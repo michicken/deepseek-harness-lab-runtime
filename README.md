@@ -12,6 +12,7 @@ Mission state deliberately lives outside `dsh-jobs-local`, because that registry
 - `Lab Mission (24h)` mode: the first user message becomes one never-ending `continuous` mission; the same Agent performs the research with its ordinary session tools. Later user messages are corrections and guidance for that Mission, never new Missions.
 - Visible mission tools: `lab_checkpoint`, `lab_tasks`, `lab_finding`, and `lab_round_report` run in the owner Session and appear in its trajectory.
 - Round handoff has a runtime effort floor: `continue`/`complete` require six successful non-control research actions plus a checkpoint; `wait` requires three actions plus a checkpoint. An early report is rejected and the same Session must continue.
+- A visible `continuous` wake runs at least three sequential research cycles in the same owner Session before yielding to the scheduler; `continue` is a sub-stage handoff, and automatic waits are capped at 60 seconds.
 - Automatic round scheduling resumes in the same Session. A visible mission waits unclaimed until its owner Session is loaded; it is never silently moved to a child Session.
 - Explicit worker-mode missions remain available for users who choose a separate Session.
 - Durable checkpoints and a SQLite task DAG carry mission state across rounds.

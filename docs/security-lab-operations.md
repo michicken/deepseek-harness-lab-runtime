@@ -21,6 +21,8 @@ With `missionModePreset: lab-mission`, the first non-empty user message becomes 
 
 Each round must perform a substantive work cycle before handing off. The runtime counts successful non-control research calls and requires at least six plus one successful `lab_checkpoint` for `continue` or `complete`, and at least three plus a checkpoint for `wait`. The system prompt also requires multiple kinds of work—analysis, experiment/test, independent cross-check, evidence preservation, or subagent verification—so the counter is a floor rather than a substitute for research quality. A premature `lab_round_report` is rejected in the same Session.
 
+For visible continuous missions, one scheduler wake is a work burst of at least three sequential research cycles in the same owner Session. A `continue` report hands off only the current sub-stage; the runtime immediately injects the next cycle instead of returning to the scheduler. A continuous `wait` is capped at 60 seconds so a model cannot turn a long requested sleep into an unattended stop.
+
 The desktop deployment mounts the subagent and fork providers only. Optional workflow/Ralph tools are omitted because the desktop Host does not provide `workflowEngine`; an unavailable optional workflow service must not block Session recovery or the main Mission.
 
 Use `continuous` for ongoing research programs. It cannot be marked complete or blocked: it continues or waits until a human pauses/stops it. Use `finite` for a scoped research plan with an end condition. A finite mission can complete only when every declared task is done and the round report contains evidence.

@@ -24,13 +24,17 @@ class ScriptedAdapter extends LlmAdapter {
         .flatMap((message) => message.content ?? [])
         .filter((block) => block.type === "tool-call")
         .map((block) => block.name);
-      const probes = called.filter((name) => name === "lab_mode_probe").length;
+      const lastReport = called.lastIndexOf("lab_round_report");
+      const currentCycle = called.slice(lastReport + 1);
+      const probes = currentCycle.filter(
+        (name) => name === "lab_mode_probe",
+      ).length;
       let name;
       let args;
       if (probes < 3) {
         name = "lab_mode_probe";
         args = { attempt: probes + 1 };
-      } else if (!called.includes("lab_checkpoint")) {
+      } else if (!currentCycle.includes("lab_checkpoint")) {
         name = "lab_checkpoint";
         args = {
           checkpoint:

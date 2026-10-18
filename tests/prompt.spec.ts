@@ -19,6 +19,9 @@ describe("worker system prompt", () => {
     expect(prompt).toContain("lab_round_report");
     expect(prompt).toContain("至少要求六个成功的非控制研究动作");
     expect(prompt).toContain("wait 也至少要求三个真实研究动作");
+    expect(prompt).toContain(
+      "一次 continuous Mission 唤醒至少连续执行三个研究周期",
+    );
     expect(prompt).toContain("SHA-256");
     expect(prompt).not.toContain("System Prompt V3.0");
   });

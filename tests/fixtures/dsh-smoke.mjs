@@ -40,14 +40,21 @@ class ScriptedAdapter extends LlmAdapter {
     if (toolErrors.length && !effortGateError)
       throw new Error(`fixture saw tool error: ${JSON.stringify(toolErrors)}`);
     let name, args;
-    const probeCount = called.filter(
+    const lastReport = called.lastIndexOf("lab_round_report");
+    const currentCycle = called.slice(lastReport + 1);
+    const checkpointCount = called.filter(
+      (value) => value === "lab_checkpoint",
+    ).length;
+    const cycle = checkpointCount + 1;
+    const probeCount = currentCycle.filter(
       (value) => value === "lab_fixture_probe",
     ).length;
     if (
       round < 2 &&
+      cycle === 1 &&
       probeCount === 1 &&
       !effortGateError &&
-      !called.includes("lab_round_report")
+      !currentCycle.includes("lab_round_report")
     ) {
       name = "lab_round_report";
       args = {
@@ -59,7 +66,7 @@ class ScriptedAdapter extends LlmAdapter {
     } else if (probeCount < 6) {
       name = "lab_fixture_probe";
       args = { attempt: probeCount + 1 };
-    } else if (!called.includes("lab_finding")) {
+    } else if (cycle === 1 && !currentCycle.includes("lab_finding")) {
       name = "lab_finding";
       args = {
         title: "Synthetic object authorization failure",
@@ -69,7 +76,7 @@ class ScriptedAdapter extends LlmAdapter {
           "Two laboratory principals; authenticated as bob; synthetic alice record",
         evidence_paths: ["proof.json"],
       };
-    } else if (!called.includes("lab_checkpoint")) {
+    } else if (!currentCycle.includes("lab_checkpoint")) {
       name = "lab_checkpoint";
       args = {
         checkpoint: `Round ${round} reproduced the synthetic ownership violation; saved proof.json; next independently repeat and review.`,
