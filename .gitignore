@@ -3,3 +3,5 @@ lib/
 .dsh-lab/
 *.log
 .DS_Store
+
+work/
