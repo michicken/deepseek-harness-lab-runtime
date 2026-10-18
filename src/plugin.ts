@@ -2,7 +2,7 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { realpathSync, statSync } from "node:fs";
-import { isAbsolute, resolve, relative } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -25,7 +25,6 @@ const PLUGIN_SOURCE = { kind: "plugin:lab-runtime" } as unknown as {
 
 export interface Config extends Partial<RuntimeOptions> {
   stateDir?: string;
-  allowedWorkspaces?: string[];
   autoStart?: boolean;
   allowedTargets?: string[];
   promptFile?: string;
@@ -78,9 +77,6 @@ export class LabService extends Service {
   readonly executor: DshExecutor;
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, "labRuntime");
-    const allowed = (config.allowedWorkspaces ?? [process.cwd()]).map((path) =>
-      realpathSync(path),
-    );
     const stateDir = config.stateDir ?? resolve(homedir(), ".dsh-lab");
     if (!isAbsolute(stateDir)) throw new Error("stateDir must be absolute");
     this.store = new MissionStore(resolve(stateDir, "missions.sqlite"));
@@ -134,16 +130,8 @@ export class LabService extends Service {
             throw new Error("A human controller Session is required");
           if (!isAbsolute(args.cwd)) throw new Error("cwd must be absolute");
           const cwd = realpathSync(args.cwd);
-          if (
-            !statSync(cwd).isDirectory() ||
-            !allowed.some((root) => {
-              const rel = relative(root, cwd);
-              return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-            })
-          )
-            throw new Error(
-              "Workspace is outside configured allowedWorkspaces",
-            );
+          if (!statSync(cwd).isDirectory())
+            throw new Error("cwd must be an existing directory");
           const selection = ctx.agentDefaultModel.currentSelection();
           const provider = exec.agent.options.provider ?? selection.provider;
           const model = exec.agent.options.model ?? selection.model;
@@ -201,14 +189,17 @@ export class LabService extends Service {
         .join("\n")
         .trim();
       if (goal.length === 0) return next();
-      const cwd = agent.session.header.cwd;
-      const allowedWorkspace =
-        cwd !== undefined &&
-        allowed.some((root) => {
-          const rel = relative(root, cwd);
-          return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-        });
-      if (!allowedWorkspace || config.allowedTargets === undefined) {
+      let cwd: string | undefined;
+      try {
+        const sessionCwd = agent.session.header.cwd;
+        if (sessionCwd !== undefined && isAbsolute(sessionCwd)) {
+          const resolvedCwd = realpathSync(sessionCwd);
+          if (statSync(resolvedCwd).isDirectory()) cwd = resolvedCwd;
+        }
+      } catch {
+        cwd = undefined;
+      }
+      if (cwd === undefined || config.allowedTargets === undefined) {
         return {
           kind: "enter",
           messages: [
@@ -216,7 +207,7 @@ export class LabService extends Service {
               content: [
                 {
                   type: "text",
-                  text: "Lab Mission mode could not start: the session workspace is not in allowedWorkspaces, or allowedTargets is not configured. Ask the human to fix the profile.",
+                  text: "Lab Mission mode could not start: the session workspace must be an existing directory and allowedTargets must be configured. Ask the human to fix the session or profile.",
                 },
               ],
               source: PLUGIN_SOURCE,
@@ -229,7 +220,7 @@ export class LabService extends Service {
         const mission = service.store.create({
           owner: agent.id,
           goal,
-          cwd: cwd!,
+          cwd,
           provider: agent.options.provider ?? selection.provider,
           model: agent.options.model ?? selection.model,
           targets: config.allowedTargets,

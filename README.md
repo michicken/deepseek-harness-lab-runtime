@@ -8,7 +8,7 @@ Mission state deliberately lives outside `dsh-jobs-local`, because that registry
 
 ## What it provides
 
-- `lab_mission_start`: create and start a durable mission on an authorized workspace and target list.
+- `lab_mission_start`: create and start a durable mission in a selected existing workspace and within the configured target list.
 - `lab_mission_status`: inspect checkpoints, failure state, task board, and findings.
 - `lab_mission_control`: pause, resume, or permanently stop an owned mission.
 - `Lab Mission (24h)` controller mode: the first user message in a session created with the configured preset becomes a continuous mission automatically. The controller never performs the research itself.
@@ -18,7 +18,7 @@ Mission state deliberately lives outside `dsh-jobs-local`, because that registry
 - Fresh worker Session per round; durable checkpoint and SQLite task DAG are the handoff.
 - SQLite WAL state, `BEGIN IMMEDIATE` claims, fenced leases, heartbeat renewal, crash recovery.
 - Evidence-bound findings: workspace path, SHA-256, and static/lab/impact classification.
-- Explicit allowed workspaces and target origins; loopback-only by default.
+- Session-selected workspace and explicit target origins; loopback-only by default.
 - Bounded event history and checkpoint size; replay-safe external work guidance.
 - Stagnation detection and a failure circuit breaker instead of an infinite blind retry loop.
 
@@ -44,7 +44,6 @@ Build the package, then add an absolute path to `lib/index.js` in a profile patc
       name: /absolute/path/to/deepseek-harness-lab-runtime/lib/index.js
       config:
         stateDir: /absolute/path/to/durable/lab-state
-        allowedWorkspaces: [/absolute/path/to/isolated/workspace]
         allowedTargets: ["http://127.0.0.1:8080"]
         promptFile: /absolute/path/to/deepseek-harness-lab-runtime/assets/security-research-system-prompt.txt
         missionModePreset: lab-mission
@@ -56,6 +55,8 @@ Build the package, then add an absolute path to `lib/index.js` in a profile patc
 `missionModePreset` is optional. When set, a session created with that agent preset gets a controller-only composition: the first non-empty user message is turned into a `continuous` mission before the model sees it. The controller receives a launch-card instruction and must not execute research itself. Every worker round is a fresh child Session, so the UI shows the real execution trace instead of a black box.
 
 `missionWorkerPreset` selects the Agent preset mounted into each Worker Session. Set it to a preset that includes the tools the worker needs; desktop dsh 0.2.x deployments normally use `standard`. The worker Session records that preset and remains a child of its controller. If this option is omitted, the Worker joins its controller's current preset when the runtime can resolve that composition.
+
+The selected session's working directory is the mission workspace. It must be an existing absolute directory, but the runtime does not restrict it to a configured workspace allowlist. File writes remain limited to that mission workspace by the host guard. Target origins are still restricted by `allowedTargets`.
 
 For dsh 0.1.x, create a preset directory such as `~/.dsh/.agent-presets/lab-mission/` with `preset.yml` and `agent.cordis.yml`. For dsh 0.2.x, the preset is a declarative profile row:
 

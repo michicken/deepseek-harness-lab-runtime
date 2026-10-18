@@ -54,7 +54,6 @@ it.skipIf(!existsSync(bin))(
               name: resolve("lib/index.js"),
               config: {
                 stateDir: join(dir, "state"),
-                allowedWorkspaces: [workspace],
                 allowedTargets: [origin],
                 pollMs: 20,
                 roundIntervalMs: 20,

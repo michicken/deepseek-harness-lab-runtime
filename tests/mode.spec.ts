@@ -67,7 +67,6 @@ it.skipIf(!existsSync(bin))(
               name: resolve("lib/index.js"),
               config: {
                 stateDir: join(dir, "state"),
-                allowedWorkspaces: [workspace],
                 allowedTargets: ["http://127.0.0.1:9"],
                 missionModePreset: "lab-mission",
                 pollMs: 20,

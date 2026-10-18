@@ -15,7 +15,7 @@ The runtime adds a best-effort tool guard for host paths, host-mutating commands
 
 ## Mission lifecycle
 
-`lab_mission_start` requires a goal, an authorized workspace, and explicit HTTP(S) target origins. Those origins define the mission's testing scope; within that scope the worker has full execution authority. Each round creates a fresh worker Session. The durable handoff is the mission checkpoint plus the SQLite task DAG and evidence files.
+`lab_mission_start` requires a goal, an existing absolute workspace directory, and explicit HTTP(S) target origins. The selected directory is the mission's file-write boundary; target origins define its network testing scope. Each round creates a fresh worker Session. The durable handoff is the mission checkpoint plus the SQLite task DAG and evidence files.
 
 With `missionModePreset: lab-mission`, the controller session does not need a tool call: the first non-empty user message becomes a `continuous` mission automatically. Set `missionWorkerPreset` to a preset with the worker's required tools; desktop dsh 0.2.x uses `standard`. The controller stays in the foreground and every worker round appears as a child Session (`origin: subagent`, `parentSession` = controller). Open the child Session to inspect commands, tool calls, checkpoints, and evidence.
 
