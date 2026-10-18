@@ -1,85 +1,112 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { FileMissionStore } from "../src/store.js";
-
-const dirs: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
-  );
-});
-
-describe("FileMissionStore", () => {
-  it("creates the state directory and atomically writes valid JSON", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "dsh-lab-store-"));
-    dirs.push(dir);
-    const store = new FileMissionStore(join(dir, "nested"));
-    await store.transact((state) => ({
-      state: { ...state, missions: { x: { id: "x" } as never } },
-      result: true,
-    }));
-    const parsed = JSON.parse(
-      await readFile(join(dir, "nested", "missions.json"), "utf8"),
-    );
-    expect(parsed.version).toBe(1);
-    expect(parsed.missions.x.id).toBe("x");
+import { afterEach, describe, it, expect } from "vitest";
+import { MissionStore } from "../src/store.js";
+import { LeaseLostError } from "../src/types.js";
+import { fixture, input, report } from "./helpers.js";
+const fixtures: ReturnType<typeof fixture>[] = [];
+afterEach(() => fixtures.splice(0).forEach((f) => f.close()));
+function setup() {
+  const f = fixture();
+  fixtures.push(f);
+  return f;
+}
+describe("transactional mission store", () => {
+  it("claims once across independent connections and fences an expired worker", () => {
+    const { store } = setup();
+    const m = store.create(input, 100);
+    const other = new MissionStore(store.path);
+    try {
+      const first = store.claim("one", 1000, 100)!;
+      expect(other.claim("two", 1000, 500)).toBeUndefined();
+      const next = other.claim("two", 1000, 1101)!;
+      expect(next.fence).toBe(first.fence + 1);
+      expect(() => store.assertLease(first, 1102)).toThrow(LeaseLostError);
+      expect(other.assertLease(next, 1102).id).toBe(m.id);
+    } finally {
+      other.close();
+    }
   });
-
-  it("serializes concurrent transactions in one process", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "dsh-lab-store-"));
-    dirs.push(dir);
-    const store = new FileMissionStore(dir);
-    await Promise.all(
-      Array.from({ length: 20 }, (_, index) =>
-        store.transact((state) => {
-          const count = Number(
-            (state.missions.counter as { count?: number } | undefined)?.count ??
-              0,
-          );
-          return {
-            state: {
-              ...state,
-              missions: {
-                ...state.missions,
-                counter: { count: count + 1 } as never,
-              },
-            },
-            result: undefined,
-          };
-        }),
-      ),
-    );
-    expect((await store.read()).missions.counter).toEqual({ count: 20 });
+  it("preserves checkpoint and state after reopening", () => {
+    const { store } = setup();
+    const m = store.create(input);
+    const lease = store.claim("worker", 10000)!;
+    store.checkpoint(lease, "Artifact A exists; next B");
+    const other = new MissionStore(store.path);
+    try {
+      expect(other.get(m.id).checkpoint).toContain("Artifact A");
+      expect(other.health().ok).toBe(true);
+    } finally {
+      other.close();
+    }
   });
-});
-
-it("serializes transactions across two store instances sharing one file", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "dsh-lab-store-"));
-  dirs.push(dir);
-  const first = new FileMissionStore(dir);
-  const second = new FileMissionStore(dir);
-  await Promise.all(
-    Array.from({ length: 12 }, (_, index) =>
-      (index % 2 === 0 ? first : second).transact(async (state) => {
-        await new Promise((resolve) => setTimeout(resolve, 2));
-        const count = Number(
-          (state.missions.counter as { count?: number } | undefined)?.count ??
-            0,
-        );
-        return {
-          state: {
-            ...state,
-            missions: {
-              ...state.missions,
-              counter: { count: count + 1 } as never,
-            },
-          },
-          result: undefined,
-        };
-      }),
-    ),
-  );
-  expect((await first.read()).missions.counter).toEqual({ count: 12 });
+  it("enforces controller ownership, canonical workspace exclusion, and duplicate prevention", () => {
+    const { store } = setup();
+    const m = store.create(input);
+    expect(() => store.get(m.id, "stranger")).toThrow("another controller");
+    expect(() => store.create(input)).toThrow("unfinished");
+    store.create({ ...input, owner: "second" });
+    expect(store.claim("one", 10000)).toBeDefined();
+    expect(store.claim("two", 10000)).toBeUndefined();
+  });
+  it("pauses and stops by revoking the lease immediately", () => {
+    const { store } = setup();
+    const m = store.create(input);
+    const lease = store.claim("worker", 10000)!;
+    store.control(m.id, "pause", "controller");
+    expect(() => store.checkpoint(lease, "stale")).toThrow(LeaseLostError);
+    store.control(m.id, "resume");
+    expect(store.claim("new", 10000)).toBeDefined();
+    store.control(m.id, "stop");
+    expect(() => store.control(m.id, "resume")).toThrow("terminal");
+  });
+  it("uses CAS and enforces the task dependency DAG and completion evidence", () => {
+    const { store } = setup();
+    store.create(input);
+    const lease = store.claim("worker", 10000)!;
+    const a = store.createTask(lease, "Experiment", []);
+    const b = store.createTask(lease, "Review", [a.id]);
+    expect(() => store.updateTask(lease, b.id, 1, "doing", [])).toThrow(
+      "dependencies",
+    );
+    expect(() => store.updateTask(lease, a.id, 99, "done", ["x"])).toThrow(
+      "revision",
+    );
+    expect(() => store.updateTask(lease, a.id, 1, "done", [])).toThrow(
+      "evidence",
+    );
+    store.updateTask(lease, a.id, 1, "done", ["test passed"]);
+    expect(() => store.settle(lease, report("complete"), 100, 4)).toThrow(
+      "all declared",
+    );
+    store.updateTask(lease, b.id, 1, "done", ["reviewed"]);
+    expect(store.settle(lease, report("complete"), 100, 4).status).toBe(
+      "completed",
+    );
+  });
+  it("retains finite history and blocks a stagnant objective", () => {
+    const { store } = setup();
+    const m = store.create(input);
+    let lease = store.claim("worker", 10000)!;
+    store.settle(lease, { ...report(), progress: false }, 1, 2);
+    lease = store.claim("worker", 10000, Date.now() + 10)!;
+    store.settle(lease, { ...report(), progress: false }, 1, 2);
+    expect(store.get(m.id).status).toBe("blocked");
+    expect(store.events(m.id).length).toBeGreaterThan(3);
+  });
+  it("forbids completion of continuous missions and persists wait deadlines", () => {
+    const { store } = setup();
+    const m = store.create({ ...input, mode: "continuous" });
+    const lease = store.claim("worker", 10000)!;
+    expect(() => store.settle(lease, report("complete"), 1, 3)).toThrow(
+      "Continuous",
+    );
+    const next = store.settle(
+      lease,
+      { ...report("wait"), waitMs: 60000 },
+      1,
+      3,
+    );
+    expect(next.status).toBe("waiting");
+    expect(store.claim("worker", 10000)).toBeUndefined();
+    expect(store.get(m.id).nextRunAt).toBeGreaterThan(Date.now() + 59000);
+  });
 });

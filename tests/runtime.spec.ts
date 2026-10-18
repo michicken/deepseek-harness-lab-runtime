@@ -1,151 +1,154 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { FileMissionStore } from "../src/store.js";
 import { MissionRuntime } from "../src/runtime.js";
-import type { MissionAgent } from "../src/types.js";
-
-const dirs: string[] = [];
-
+import { PermanentError, type RoundExecutor } from "../src/types.js";
+import { fixture, input, report, until } from "./helpers.js";
+const fixtures: ReturnType<typeof fixture>[] = [];
+const runtimes: MissionRuntime[] = [];
 afterEach(async () => {
-  await Promise.all(
-    dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
-  );
+  await Promise.all(runtimes.splice(0).map((r) => r.stop()));
+  fixtures.splice(0).forEach((f) => f.close());
 });
-
-function agent(id: string) {
-  const messages: unknown[] = [];
-  const value: MissionAgent = {
-    id,
-    followup: (message) => {
-      messages.push(message);
-    },
-    steer: (message) => {
-      messages.push(message);
-    },
-  };
-  return { value, messages };
+function setup(executor: RoundExecutor, options = {}) {
+  const f = fixture();
+  fixtures.push(f);
+  const runtime = new MissionRuntime(f.store, executor, {
+    pollMs: 10,
+    heartbeatMs: 10,
+    leaseMs: 100,
+    roundIntervalMs: 10,
+    retryBaseMs: 10,
+    retryMaxMs: 20,
+    ...options,
+  });
+  runtimes.push(runtime);
+  return { ...f, runtime };
 }
-
-async function makeRuntime(options: { maxEventHistory?: number } = {}) {
-  const dir = await mkdtemp(join(tmpdir(), "dsh-lab-runtime-"));
-  dirs.push(dir);
-  const store = new FileMissionStore(dir);
-  const messages: string[] = [];
-  const runtime = new MissionRuntime(
-    store,
-    { stateDir: dir, ...options },
-    (text) => {
-      messages.push(text);
-      return text;
-    },
-  );
-  return { dir, store, runtime, messages };
-}
-
-describe("MissionRuntime", () => {
-  it("persists a mission and starts the first turn", async () => {
-    const { runtime, store, messages } = await makeRuntime();
-    const lead = agent("lead");
-    const mission = await runtime.start({
-      goal: "Keep investigating until the evidence is complete.",
-      agent: lead.value,
+describe("scheduler", () => {
+  it("continues across fresh rounds and finishes a verified finite objective", async () => {
+    let calls = 0;
+    const { store, runtime } = setup({
+      async run(c) {
+        c.checkpoint(`round ${++calls}`);
+        return report(calls === 3 ? "complete" : "continue");
+      },
     });
-
-    expect(mission.status).toBe("running");
-    expect(lead.messages).toHaveLength(1);
-    expect(messages[0]).toContain(mission.id);
-    expect((await store.read()).missions[mission.id]?.agentId).toBe("lead");
+    const m = store.create(input);
+    runtime.start();
+    await until(() => store.get(m.id).status === "completed");
+    expect(calls).toBe(3);
+    expect(store.get(m.id).round).toBe(3);
   });
-
-  it("continues after every turn and stops continuing after pause", async () => {
-    const { runtime } = await makeRuntime();
-    const lead = agent("lead");
-    const mission = await runtime.start({
-      goal: "Work forever until paused.",
-      agent: lead.value,
+  it("renews leases during a long model/tool call", async () => {
+    const { store, runtime } = setup({
+      async run() {
+        await new Promise((r) => setTimeout(r, 350));
+        return report("complete");
+      },
     });
-
-    await runtime.onTurnStopping(lead.value);
-    await runtime.onTurnStopping(lead.value);
-    expect(lead.messages).toHaveLength(3);
-    expect((await runtime.status(mission.id))[0]?.turnCount).toBe(2);
-
-    await runtime.pause(mission.id, lead.value);
-    await runtime.onTurnStopping(lead.value);
-    expect(lead.messages).toHaveLength(3);
+    const m = store.create(input);
+    runtime.start();
+    await until(() => runtime.running === 1);
+    await new Promise((r) => setTimeout(r, 220));
+    expect(store.claim("competitor", 100)).toBeUndefined();
+    await until(() => store.get(m.id).status === "completed");
   });
-
-  it("requires the owning agent and resumes a persisted mission on another agent", async () => {
-    const { runtime, store } = await makeRuntime();
-    const lead = agent("lead");
-    const other = agent("other");
-    const mission = await runtime.start({
-      goal: "Recover after restart.",
-      agent: lead.value,
-    });
-    await expect(
-      runtime.checkpoint(mission.id, other.value, "forged"),
-    ).rejects.toThrow("owned by another agent");
-    await runtime.checkpoint(
-      mission.id,
-      lead.value,
-      "Finished the first investigation phase.",
+  it("retries transient failures and opens a circuit on repeated failure", async () => {
+    let calls = 0;
+    const { store, runtime } = setup(
+      {
+        async run() {
+          calls++;
+          throw new Error("network temporarily down");
+        },
+      },
+      { maxConsecutiveFailures: 3 },
     );
-
-    const resumed = await runtime.resume(mission.id, other.value);
-    expect(resumed.agentId).toBe("other");
-    expect(other.messages).toHaveLength(1);
-    expect((await store.read()).missions[mission.id]?.checkpoint).toContain(
-      "Finished",
-    );
+    const m = store.create(input);
+    runtime.start();
+    await until(() => store.get(m.id).status === "blocked");
+    expect(calls).toBe(3);
+    expect(store.get(m.id).failures).toBe(3);
   });
-
-  it("bounds event history and preserves checkpoints across a fresh store instance", async () => {
-    const { dir, runtime } = await makeRuntime({ maxEventHistory: 3 });
-    const lead = agent("lead");
-    const mission = await runtime.start({
-      goal: "Bound history.",
-      agent: lead.value,
+  it("blocks permanent authentication/config failures without burning retries", async () => {
+    const { store, runtime } = setup({
+      async run() {
+        throw new PermanentError("AUTH invalid credential");
+      },
     });
-    await runtime.checkpoint(mission.id, lead.value, "one");
-    await runtime.onTurnStopping(lead.value);
-    await runtime.checkpoint(mission.id, lead.value, "two");
-    await runtime.onTurnStopping(lead.value);
-    await runtime.checkpoint(mission.id, lead.value, "three");
-
-    const state = await new FileMissionStore(dir).read();
-    const saved = state.missions[mission.id];
-    expect(saved?.checkpoint).toBe("three");
-    expect(saved?.events.length).toBe(3);
+    const m = store.create(input);
+    runtime.start();
+    await until(() => store.get(m.id).status === "blocked");
+    expect(store.get(m.id).failures).toBe(1);
+  });
+  it("cancels a paused worker and cannot commit a stale report", async () => {
+    let observed = false;
+    const { store, runtime } = setup({
+      async run(c) {
+        await new Promise<void>((resolve) => {
+          c.signal.addEventListener(
+            "abort",
+            () => {
+              observed = true;
+              resolve();
+            },
+            { once: true },
+          );
+        });
+        return report("complete");
+      },
+    });
+    const m = store.create(input);
+    runtime.start();
+    await until(() => runtime.running === 1);
+    store.control(m.id, "pause");
+    await until(() => observed && runtime.running === 0);
+    expect(store.get(m.id).status).toBe("paused");
+    expect(store.get(m.id).round).toBe(0);
+  });
+  it("releases work on graceful shutdown and a new runtime resumes its checkpoint", async () => {
+    const first = setup({
+      async run(c) {
+        c.checkpoint("Step A complete");
+        await new Promise<void>((resolve) =>
+          c.signal.addEventListener("abort", () => resolve(), { once: true }),
+        );
+        c.signal.throwIfAborted();
+        return report();
+      },
+    });
+    const m = first.store.create(input);
+    first.runtime.start();
+    await until(() => first.store.get(m.id).checkpoint !== "");
+    await first.runtime.stop();
+    expect(first.store.get(m.id).status).toBe("ready");
+    const recovered = new MissionRuntime(
+      first.store,
+      {
+        async run(c) {
+          expect(c.lease.mission.checkpoint).toBe("Step A complete");
+          return report("complete");
+        },
+      },
+      { pollMs: 10 },
+    );
+    runtimes.push(recovered);
+    recovered.start();
+    await until(() => first.store.get(m.id).status === "completed");
+  });
+  it("rejects unsafe timing configuration", () => {
+    const f = fixture();
+    fixtures.push(f);
     expect(
-      JSON.parse(await readFile(join(dir, "missions.json"), "utf8")).version,
-    ).toBe(1);
+      () =>
+        new MissionRuntime(
+          f.store,
+          {
+            async run() {
+              return report();
+            },
+          },
+          { leaseMs: 10, heartbeatMs: 10 },
+        ),
+    ).toThrow("three heartbeat");
   });
-});
-
-it("uses a persistent lease to reject duplicate runtime ownership and allows takeover after expiry", async () => {
-  const { dir } = await makeRuntime();
-  const first = new MissionRuntime(new FileMissionStore(dir), {
-    stateDir: dir,
-    leaseMs: 20,
-  });
-  const second = new MissionRuntime(new FileMissionStore(dir), {
-    stateDir: dir,
-    leaseMs: 20,
-  });
-  const lead = agent("lead");
-  const takeover = agent("takeover");
-  const mission = await first.start({
-    goal: "Lease this mission.",
-    agent: lead.value,
-  });
-  await expect(second.resume(mission.id, takeover.value)).rejects.toThrow(
-    "leased by another runtime",
-  );
-  await new Promise((resolve) => setTimeout(resolve, 30));
-  await expect(
-    second.resume(mission.id, takeover.value),
-  ).resolves.toMatchObject({ agentId: "takeover" });
 });

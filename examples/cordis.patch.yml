@@ -1,7 +1,8 @@
 - insert:
-    - id: long-running-runtime
+    - id: lab-runtime
       name: /absolute/path/to/deepseek-harness-lab-runtime/lib/index.js
       config:
         stateDir: /absolute/path/to/durable/lab-state
-        maxEventHistory: 1000
-        maxCheckpointChars: 16000
+        allowedWorkspaces: [/absolute/path/to/isolated/workspace]
+        allowedTargets: ["http://127.0.0.1:8080"]
+        promptFile: /absolute/path/to/deepseek-harness-lab-runtime/assets/security-research-system-prompt.txt

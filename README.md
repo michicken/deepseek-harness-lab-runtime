@@ -1,18 +1,24 @@
 # DeepSeek Harness Lab Runtime
 
-A durable long-running mission plugin for DeepSeek Harness. It turns one Agent Session into a resumable autonomous mission: after each completed turn the plugin queues the next turn, persists checkpoints atomically, and exposes explicit pause, resume, complete, stop, and status controls.
+Durable mission scheduler for authorized, isolated security research. The worker identity is `assets/security-research-system-prompt.txt` (V3.1-LAB): the supplied vulnerability-research prompt plus long-running checkpoints, idempotent replay, target authorization, and evidence-hash rules.
 
-This package deliberately keeps mission state outside `dsh-jobs-local`, because that registry is process-local. The state store uses an atomic JSON rename plus an inter-process lock, so a supervisor can restart the Harness process without losing the mission record.
+A durable long-running mission plugin for DeepSeek Harness. A controller starts a mission; a scheduler then runs successive rounds in fresh worker Sessions, commits a checkpoint and task-board state after each round, and continues until a finite objective completes or a human pauses/stops it.
+
+Mission state deliberately lives outside `dsh-jobs-local`, because that registry is process-local. SQLite WAL plus `BEGIN IMMEDIATE` gives transactional claims, fenced leases, heartbeat renewal, and crash recovery across daemon processes.
 
 ## What it provides
 
-- `lab_mission_start`: create and start a durable mission.
-- `lab_mission_checkpoint`: save concise progress for recovery and context rollover.
-- `lab_mission_status`: inspect one or all missions.
-- `lab_mission_pause`, `lab_mission_complete`, `lab_mission_stop`: explicit lifecycle controls.
-- Automatic continuation from `agent/turn-stopping` through `agent.followup()`.
-- Bounded event history and checkpoint size.
-- Atomic persistence and stale-lock recovery.
+- `lab_mission_start`: create and start a durable mission on an authorized workspace and target list.
+- `lab_mission_status`: inspect checkpoints, failure state, task board, and findings.
+- `lab_mission_control`: pause, resume, or permanently stop an owned mission.
+- Worker tools: `lab_checkpoint`, `lab_tasks`, `lab_finding`, and `lab_round_report`.
+- Automatic round scheduling with a fresh worker Session per round.
+- Fresh worker Session per round; durable checkpoint and SQLite task DAG are the handoff.
+- SQLite WAL state, `BEGIN IMMEDIATE` claims, fenced leases, heartbeat renewal, crash recovery.
+- Evidence-bound findings: workspace path, SHA-256, and static/lab/impact classification.
+- Explicit allowed workspaces and target origins; loopback-only by default.
+- Bounded event history and checkpoint size; replay-safe external work guidance.
+- Stagnation detection and a failure circuit breaker instead of an infinite blind retry loop.
 
 The plugin does not claim infinite tokens. Each model request remains bounded by the provider and context window; the mission continues across finite turns using checkpoints and the workspace as durable working memory.
 
@@ -26,17 +32,22 @@ npm run typecheck
 
 ## Load into dsh
 
-Build the package, then add an absolute path to `lib/plugin.js` in a profile patch:
+Build the package, then add an absolute path to `lib/index.js` in a profile patch:
 
 ```yaml
 - insert:
-    - id: long-running-runtime
-      name: /absolute/path/to/deepseek-harness-lab-runtime/lib/plugin.js
+    - id: lab-runtime
+      name: /absolute/path/to/deepseek-harness-lab-runtime/lib/index.js
       config:
         stateDir: /absolute/path/to/durable/lab-state
+        allowedWorkspaces: [/absolute/path/to/isolated/workspace]
+        allowedTargets: ["http://127.0.0.1:8080"]
+        promptFile: /absolute/path/to/deepseek-harness-lab-runtime/assets/security-research-system-prompt.txt
 ```
 
-Run the profile under an external supervisor such as launchd, systemd, or a container manager. Use a persistent dsh Session when recovering an Agent after restart, then call `lab_mission_resume` in the resumed Session. The persisted lease prevents a second runtime from taking over while the previous owner is still healthy; an expired lease can be claimed by the recovery process.
+Run the profile under an external supervisor such as launchd, systemd, or a container manager. After a daemon restart the new process claims expired leases automatically; no human re-entry is needed. The persisted lease prevents a second runtime from taking over while the previous owner is healthy.
+
+The default worker prompt is version `V3.1-LAB`, loaded from `assets/security-research-system-prompt.txt` and injected as an agent-scoped system prompt section. See `docs/security-lab-operations.md` for isolation and lifecycle requirements.
 
 ## Operational boundary
 
