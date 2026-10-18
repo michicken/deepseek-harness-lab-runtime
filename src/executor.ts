@@ -101,6 +101,16 @@ export class DshExecutor implements RoundExecutor {
       this.visibleAgents.delete(agent.id);
       this.visibleRuns.delete(agent.id);
     });
+    ctx.on("agent/created", ({ agent }) => {
+      const active = this.store
+        .list(agent.id)
+        .find(
+          (mission) =>
+            mission.executionMode === "visible" &&
+            !["stopped", "completed"].includes(mission.status),
+        );
+      if (active !== undefined) this.installVisibleTools(agent);
+    });
   }
   canRun(mission: import("./types.js").Mission): boolean {
     return (

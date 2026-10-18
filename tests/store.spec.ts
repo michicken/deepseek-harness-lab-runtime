@@ -130,4 +130,21 @@ describe("transactional mission store", () => {
     expect(store.get(m.id).status).not.toBe("blocked");
     expect(store.get(m.id).nextRunAt).toBeGreaterThan(Date.now() + 59000);
   });
+  it("wakes a waiting mission immediately for owner guidance", () => {
+    const { store } = setup();
+    const m = store.create({
+      ...input,
+      mode: "continuous",
+      executionMode: "visible",
+    });
+    const lease = store.claim("worker", 10000)!;
+    const waiting = store.settle(lease, report(), 600000, 3);
+    expect(waiting.status).toBe("waiting");
+    const woken = store.wake(m.id, "controller");
+    expect(woken.status).toBe("ready");
+    expect(woken.nextRunAt).toBeLessThanOrEqual(Date.now());
+    expect(store.events(m.id).some((event) => event.kind === "woken")).toBe(
+      true,
+    );
+  });
 });

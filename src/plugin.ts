@@ -187,7 +187,34 @@ export class LabService extends Service {
       const active = service.store
         .list(agent.id)
         .find((mission) => !["stopped", "completed"].includes(mission.status));
-      if (active !== undefined) return next();
+      if (active !== undefined) {
+        const hasUserMessage = messages.some(
+          (message) => message.source.kind === "user",
+        );
+        if (
+          hasUserMessage &&
+          active.executionMode === "visible" &&
+          active.status === "waiting"
+        ) {
+          service.store.wake(active.id, agent.id);
+          service.runtime.tick();
+          return {
+            kind: "enter",
+            messages: [
+              createUserMessage({
+                content: [
+                  {
+                    type: "text",
+                    text: "已收到当前 Mission 的继续或纠正，已立即唤醒下一研究轮次。继续使用同一个 Mission，在当前会话中完成实质分析、实验和证据核对；不要创建第二个 Mission。",
+                  },
+                ],
+                source: PLUGIN_SOURCE,
+              }),
+            ],
+          };
+        }
+        return next();
+      }
       const goal = messages
         .filter((message) => message.source.kind === "user")
         .flatMap((message) => message.content)

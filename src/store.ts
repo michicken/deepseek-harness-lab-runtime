@@ -306,6 +306,23 @@ export class MissionStore {
       this.event(m.id, "released", {});
     });
   }
+  /** Wake a waiting Mission immediately when its owner sends a new instruction. */
+  wake(id: string, owner?: string): Mission {
+    return this.tx(() => {
+      const mission = this.get(id, owner);
+      if (["completed", "stopped"].includes(mission.status))
+        throw new Error(`Mission is terminal: ${mission.status}`);
+      if (mission.status !== "waiting") return mission;
+      mission.status = "ready";
+      mission.nextRunAt = Date.now();
+      mission.updatedAt = Date.now();
+      mission.revision++;
+      mission.fence++;
+      this.save(mission);
+      this.event(id, "woken", {});
+      return mission;
+    });
+  }
   control(
     id: string,
     action: "pause" | "resume" | "stop",
