@@ -42,7 +42,12 @@ export class MissionRuntime {
     if (this.stopped) return;
     try {
       while (this.active.size < this.options.concurrency) {
-        const lease = this.store.claim(this.worker, this.options.leaseMs);
+        const lease = this.store.claim(
+          this.worker,
+          this.options.leaseMs,
+          Date.now(),
+          (mission) => this.executor.canRun?.(mission) ?? true,
+        );
         if (!lease) break;
         const controller = new AbortController();
         const done = Promise.resolve()
@@ -71,6 +76,9 @@ export class MissionRuntime {
   }
   get running(): number {
     return this.active.size;
+  }
+  cancelMission(id: string, reason = "Mission execution mode changed"): void {
+    this.active.get(id)?.controller.abort(new Error(reason));
   }
   private async run(lease: Lease, controller: AbortController): Promise<void> {
     const heartbeat = setInterval(() => {

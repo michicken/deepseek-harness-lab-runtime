@@ -24,7 +24,7 @@ const bin =
   );
 
 it.skipIf(!existsSync(bin))(
-  "turns the first message in a Lab Mission preset session into a durable mission with a visible worker session",
+  "turns the first message in a Lab Mission preset session into a visible mission in the same Agent Session",
   async () => {
     const dir = mkdtempSync(join(tmpdir(), "dsh-mode-"));
     const dshHome = join(dir, "dsh");
@@ -112,12 +112,14 @@ it.skipIf(!existsSync(bin))(
       expect(line, errors + "\n" + output).toBeDefined();
       const result = JSON.parse(line!);
       expect(result.mission.goal).toContain("Audit the local lab fixture");
-      expect(result.launchCard).toBe(true);
+      expect(result.mission.executionMode).toBe("visible");
+      expect(result.hasLaunchAcknowledgment).toBe(true);
+      expect(result.visibleRoundInOwner).toBe(true);
       expect(
         result.events.some(
           (event: { kind: string }) => event.kind === "session",
         ),
-      ).toBe(true);
+      ).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

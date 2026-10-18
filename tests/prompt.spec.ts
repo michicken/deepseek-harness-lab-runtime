@@ -8,7 +8,9 @@ describe("worker system prompt", () => {
       new URL("../assets/security-research-system-prompt.txt", import.meta.url),
       "utf8",
     );
-    expect(prompt).toContain("System Prompt V3.1-LAB");
+    expect(prompt).toContain("系统提示词 V3.1-LAB");
+    expect(prompt).toContain("全程使用简体中文");
+    expect(prompt).toContain("同一个 Agent Session 只绑定一个长期 Mission");
     expect(prompt).toContain("长期无人值守运行协议");
     expect(prompt).toContain("授权范围、主机隔离与 Clash 禁区");
     expect(prompt).toContain("拥有完成整个研究目标所需的完整行动权限");
@@ -30,13 +32,13 @@ describe("host guard", () => {
     ).toContain("Clash");
     expect(
       hostGuard("bash", { command: "launchctl list" }, workspace),
-    ).toContain("macOS host");
+    ).toContain("macOS 宿主");
     expect(hostGuard("computer", {}, workspace)).toContain("GUI");
   });
   it("blocks writes outside the workspace but allows lab-local work", () => {
     expect(
       hostGuard("write", { file_path: "/Users/micx/Library/test" }, workspace),
-    ).toContain("workspace");
+    ).toContain("工作区");
     expect(
       hostGuard("write", { file_path: "proof.json" }, workspace),
     ).toBeUndefined();

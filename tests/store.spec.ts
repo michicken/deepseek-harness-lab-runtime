@@ -25,6 +25,22 @@ describe("transactional mission store", () => {
       other.close();
     }
   });
+  it("leaves visible missions unclaimed until their owner Session is available", () => {
+    const { store } = setup();
+    const mission = store.create({ ...input, executionMode: "visible" });
+    expect(
+      store.claim(
+        "runtime",
+        10000,
+        Date.now(),
+        (candidate) => candidate.executionMode !== "visible",
+      ),
+    ).toBeUndefined();
+    expect(store.get(mission.id).status).toBe("ready");
+    expect(
+      store.events(mission.id).some((event) => event.kind === "claimed"),
+    ).toBe(false);
+  });
   it("preserves checkpoint and state after reopening", () => {
     const { store } = setup();
     const m = store.create(input);
@@ -92,21 +108,26 @@ describe("transactional mission store", () => {
     expect(store.get(m.id).status).toBe("blocked");
     expect(store.events(m.id).length).toBeGreaterThan(3);
   });
-  it("forbids completion of continuous missions and persists wait deadlines", () => {
+  it("keeps continuous missions alive and persists wait deadlines", () => {
     const { store } = setup();
     const m = store.create({ ...input, mode: "continuous" });
     const lease = store.claim("worker", 10000)!;
-    expect(() => store.settle(lease, report("complete"), 1, 3)).toThrow(
-      "Continuous",
-    );
-    const next = store.settle(
-      lease,
-      { ...report("wait"), waitMs: 60000 },
+    const next = store.settle(lease, report("complete"), 1, 3);
+    expect(next.status).toBe("waiting");
+    expect(store.events(m.id)[0]).toMatchObject({
+      kind: "round-settled",
+      data: expect.stringContaining('"action":"wait"'),
+    });
+    const retry = store.claim("worker", 10000, next.nextRunAt)!;
+    const blockedAsWait = store.settle(
+      retry,
+      { ...report("blocked"), waitMs: 60000 },
       1,
       3,
     );
-    expect(next.status).toBe("waiting");
-    expect(store.claim("worker", 10000)).toBeUndefined();
+    expect(blockedAsWait.status).toBe("waiting");
+    expect(store.get(m.id).status).not.toBe("completed");
+    expect(store.get(m.id).status).not.toBe("blocked");
     expect(store.get(m.id).nextRunAt).toBeGreaterThan(Date.now() + 59000);
   });
 });

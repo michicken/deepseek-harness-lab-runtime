@@ -80,6 +80,24 @@ describe("scheduler", () => {
     await until(() => store.get(m.id).status === "blocked");
     expect(store.get(m.id).failures).toBe(1);
   });
+  it("keeps continuous missions waiting instead of opening an automatic circuit", async () => {
+    let calls = 0;
+    const { store, runtime } = setup(
+      {
+        async run() {
+          calls++;
+          throw new PermanentError("AUTH temporarily unavailable");
+        },
+      },
+      { retryBaseMs: 1, retryMaxMs: 1, maxConsecutiveFailures: 2 },
+    );
+    const m = store.create({ ...input, mode: "continuous" });
+    runtime.start();
+    await until(() => calls >= 3);
+    expect(store.get(m.id).status).toBe("waiting");
+    expect(store.get(m.id).status).not.toBe("blocked");
+    expect(store.get(m.id).status).not.toBe("completed");
+  });
   it("cancels a paused worker and cannot commit a stale report", async () => {
     let observed = false;
     const { store, runtime } = setup({

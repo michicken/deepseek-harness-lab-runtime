@@ -18,6 +18,7 @@ export interface NewMission {
   provider: string;
   model: string;
   mode?: "finite" | "continuous";
+  executionMode?: "worker" | "visible";
   targets?: string[];
 }
 /** SQLite WAL + BEGIN IMMEDIATE: claims, checkpoints and reports share a fenced transaction. */
@@ -82,6 +83,7 @@ export class MissionStore {
       const mission: Mission = {
         ...input,
         mode: input.mode ?? "finite",
+        executionMode: input.executionMode ?? "worker",
         targets: input.targets ?? [],
         id: `mission-${randomUUID()}`,
         status: "ready",
@@ -107,7 +109,7 @@ export class MissionStore {
     const row = this.db.prepare("SELECT data FROM missions WHERE id=?").get(id);
     if (!row || typeof row.data !== "string")
       throw new Error("Unknown mission");
-    const mission = JSON.parse(row.data) as Mission;
+    const mission = this.decodeMission(row.data);
     if (owner !== undefined && mission.owner !== owner)
       throw new Error("Mission belongs to another controller");
     return mission;
@@ -119,34 +121,61 @@ export class MissionStore {
         : this.db
             .prepare("SELECT data FROM missions WHERE owner=? ORDER BY rowid")
             .all(owner);
-    return rows.map((row) => JSON.parse(String(row.data)) as Mission);
+    return rows.map((row) => this.decodeMission(row.data));
   }
-  claim(worker: string, leaseMs: number, now = Date.now()): Lease | undefined {
+  /** Convert a running hidden mission to the visible owner Session without losing its checkpoint. */
+  adoptVisible(id: string, owner: string): Mission {
+    return this.tx(() => {
+      const mission = this.get(id, owner);
+      if (["completed", "stopped"].includes(mission.status))
+        throw new Error(`Mission is terminal: ${mission.status}`);
+      mission.executionMode = "visible";
+      mission.status = "ready";
+      mission.leaseOwner = null;
+      mission.leaseUntil = 0;
+      mission.nextRunAt = Date.now();
+      mission.fence++;
+      mission.updatedAt = Date.now();
+      mission.revision++;
+      this.save(mission);
+      this.event(id, "execution-mode-changed", { executionMode: "visible" });
+      return mission;
+    });
+  }
+  claim(
+    worker: string,
+    leaseMs: number,
+    now = Date.now(),
+    eligible?: (mission: Mission) => boolean,
+  ): Lease | undefined {
     return this.tx(() => {
       // Workspace exclusion also covers separate daemon processes sharing this database.
-      const row = this.db
+      const rows = this.db
         .prepare(
           `SELECT id FROM missions m WHERE
         ((m.status IN ('ready','waiting') AND m.due<=?) OR (m.status='running' AND m.lease_until<=?))
         AND NOT EXISTS (SELECT 1 FROM missions other WHERE other.id!=m.id AND other.cwd=m.cwd AND other.status='running' AND other.lease_until>?)
-        ORDER BY m.due,m.rowid LIMIT 1`,
+        ORDER BY m.due,m.rowid`,
         )
-        .get(now, now, now);
-      if (!row) return undefined;
-      const m = this.get(String(row.id));
-      const recovered = m.status === "running";
-      m.status = "running";
-      m.leaseOwner = worker;
-      m.leaseUntil = now + leaseMs;
-      m.fence++;
-      m.updatedAt = now;
-      m.revision++;
-      this.save(m);
-      this.event(m.id, recovered ? "recovered" : "claimed", {
-        worker,
-        fence: m.fence,
-      });
-      return { mission: m, worker, fence: m.fence };
+        .all(now, now, now);
+      for (const row of rows) {
+        const m = this.get(String(row.id));
+        if (eligible && !eligible(m)) continue;
+        const recovered = m.status === "running";
+        m.status = "running";
+        m.leaseOwner = worker;
+        m.leaseUntil = now + leaseMs;
+        m.fence++;
+        m.updatedAt = now;
+        m.revision++;
+        this.save(m);
+        this.event(m.id, recovered ? "recovered" : "claimed", {
+          worker,
+          fence: m.fence,
+        });
+        return { mission: m, worker, fence: m.fence };
+      }
+      return undefined;
     });
   }
   assertLease(lease: Lease, now = Date.now()): Mission {
@@ -188,12 +217,16 @@ export class MissionStore {
     checkText(report.checkpoint, "checkpoint", 16000);
     return this.tx(() => {
       const m = this.assertLease(lease, now);
-      if (report.action === "complete" && m.mode === "continuous")
-        throw new Error(
-          "Continuous missions must wait, pause or stop; completion is disabled",
-        );
+      // A continuous Mission is intentionally non-terminal. If a model emits
+      // complete/blocked anyway, keep the durable loop alive as a wait; only
+      // explicit human control may pause or stop it.
+      const action =
+        m.mode === "continuous" &&
+        (report.action === "complete" || report.action === "blocked")
+          ? "wait"
+          : report.action;
       if (
-        report.action === "complete" &&
+        action === "complete" &&
         (!report.evidence.length ||
           this.tasks(m.id).some((t) => t.status !== "done"))
       )
@@ -206,23 +239,26 @@ export class MissionStore {
       m.lastError = "";
       m.stagnantRounds = report.progress ? 0 : m.stagnantRounds + 1;
       m.status =
-        report.action === "complete"
+        action === "complete"
           ? "completed"
-          : report.action === "blocked"
+          : action === "blocked"
             ? "blocked"
             : "waiting";
-      if (m.stagnantRounds >= maxStagnant && report.action === "continue") {
+      if (
+        m.mode !== "continuous" &&
+        m.stagnantRounds >= maxStagnant &&
+        action === "continue"
+      ) {
         m.status = "blocked";
         m.lastError = "No measurable progress across consecutive rounds";
       }
-      m.nextRunAt =
-        now + (report.action === "wait" ? report.waitMs : intervalMs);
+      m.nextRunAt = now + (action === "wait" ? report.waitMs : intervalMs);
       m.updatedAt = now;
       m.revision++;
       m.leaseOwner = null;
       m.leaseUntil = 0;
       this.save(m);
-      this.event(m.id, "round-settled", report);
+      this.event(m.id, "round-settled", { ...report, action });
       return m;
     });
   }
@@ -238,7 +274,12 @@ export class MissionStore {
       const m = this.assertLease(lease, now);
       m.failures++;
       m.lastError = redact(error).slice(0, 4000);
-      m.status = permanent || m.failures >= maxFailures ? "blocked" : "waiting";
+      m.status =
+        m.mode === "continuous"
+          ? "waiting"
+          : permanent || m.failures >= maxFailures
+            ? "blocked"
+            : "waiting";
       m.nextRunAt = now + retryMs;
       m.updatedAt = now;
       m.revision++;
@@ -446,6 +487,21 @@ export class MissionStore {
         m.fence,
         JSON.stringify(m),
       );
+  }
+  private decodeMission(value: unknown): Mission {
+    const mission = JSON.parse(String(value)) as Partial<Mission> & {
+      owner: string;
+      goal: string;
+      cwd: string;
+      provider: string;
+      model: string;
+      mode: "finite" | "continuous";
+      targets: string[];
+    };
+    return {
+      ...mission,
+      executionMode: mission.executionMode === "visible" ? "visible" : "worker",
+    } as Mission;
   }
   private saveTask(t: LabTask): void {
     this.db

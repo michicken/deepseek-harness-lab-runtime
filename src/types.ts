@@ -15,6 +15,7 @@ export interface Mission {
   provider: string;
   model: string;
   mode: "finite" | "continuous";
+  executionMode: "worker" | "visible";
   targets: string[];
   status: MissionStatus;
   checkpoint: string;
@@ -79,6 +80,8 @@ export interface RoundContext {
 }
 export interface RoundExecutor {
   run(context: RoundContext): Promise<RoundReport>;
+  /** Whether the owner execution context exists now; unavailable visible missions stay unclaimed. */
+  canRun?(mission: Mission): boolean;
 }
 export interface RuntimeOptions {
   concurrency: number;

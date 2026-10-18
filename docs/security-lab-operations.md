@@ -15,11 +15,11 @@ The runtime adds a best-effort tool guard for host paths, host-mutating commands
 
 ## Mission lifecycle
 
-`lab_mission_start` requires a goal, an existing absolute workspace directory, and explicit HTTP(S) target origins. The selected directory is the mission's file-write boundary; target origins define its network testing scope. Each round creates a fresh worker Session. The durable handoff is the mission checkpoint plus the SQLite task DAG and evidence files.
+`lab_mission_start` requires a goal, an existing absolute workspace directory, and explicit HTTP(S) target origins. The selected directory is the mission's file-write boundary; target origins define its network testing scope. Visible missions run each round in the owner Session; explicitly selected worker mode creates a separate Session. The durable handoff is the mission checkpoint plus the SQLite task DAG and evidence files.
 
-With `missionModePreset: lab-mission`, the controller session does not need a tool call: the first non-empty user message becomes a `continuous` mission automatically. Set `missionWorkerPreset` to a preset with the worker's required tools; desktop dsh 0.2.x uses `standard`. The controller stays in the foreground and every worker round appears as a child Session (`origin: subagent`, `parentSession` = controller). Open the child Session to inspect commands, tool calls, checkpoints, and evidence.
+With `missionModePreset: lab-mission`, the first non-empty user message becomes one never-ending `continuous` mission automatically. The Agent performs the research in that same Session, using its regular tools; each call, result, checkpoint and follow-up round stays in the ordinary transcript and trajectory. No worker child Session is created for this mode. Later user messages are corrections or guidance for the same Mission, never new Missions. The continuous Mission converts blockers and model mistakes into waits and keeps retrying; it never completes or blocks automatically. Only an explicit human pause/stop through `lab_mission_control` interrupts it. Manually started worker-mode missions continue to use `missionWorkerPreset` and a separate Session.
 
-Use `continuous` for ongoing research programs. It cannot be marked complete: it continues, waits, pauses, or blocks. Use `finite` for a scoped research plan with an end condition. A finite mission can complete only when every declared task is done and the round report contains evidence.
+Use `continuous` for ongoing research programs. It cannot be marked complete or blocked: it continues or waits until a human pauses/stops it. Use `finite` for a scoped research plan with an end condition. A finite mission can complete only when every declared task is done and the round report contains evidence.
 
 `lab_mission_control` pauses, resumes, or permanently stops a mission. Pause and stop revoke the lease immediately; the worker is cancelled at the next heartbeat and cannot commit a stale result.
 
@@ -40,4 +40,4 @@ SQLite uses WAL and `BEGIN IMMEDIATE`; claims, heartbeats, checkpoints, findings
 
 ## System prompt
 
-The default worker prompt is `assets/security-research-system-prompt.txt`, version `V3.1-LAB`. It is injected as an agent-scoped system prompt section. Set `promptFile` only to another reviewed V3.1-LAB-compatible file; startup fails if the version marker or long-running section is absent.
+The default mission prompt is `assets/security-research-system-prompt.txt`, version `V3.1-LAB`. It is injected as an agent-scoped system prompt section. Set `promptFile` only to another reviewed V3.1-LAB-compatible file; startup fails if the version marker or long-running section is absent.

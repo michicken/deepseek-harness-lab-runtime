@@ -1,6 +1,6 @@
 // Real dsh loop + real Lab Mission preset, with a scripted model. This fixture
 // proves that the first user message in a `lab-mission` session becomes a
-// durable mission and that the runtime creates a visible worker session.
+// durable mission and executes through the same visible Agent Session.
 import {
   LlmAdapter,
   ToolCallId,
@@ -18,10 +18,10 @@ class ScriptedAdapter extends LlmAdapter {
       .filter((block) => block.type === "text")
       .map((block) => block.text)
       .join("\n");
-    if (prompt.includes("carrying out round")) {
+    if (prompt.includes("你正在执行持久自主任务")) {
       const args = {
         action: "blocked",
-        checkpoint: "Lab Mission mode fixture reached a worker session.",
+        checkpoint: "Lab Mission mode fixture ran in the owner Session.",
         evidence: ["none"],
         progress: false,
       };
@@ -37,7 +37,12 @@ class ScriptedAdapter extends LlmAdapter {
       yield {
         type: "block-end",
         index: 0,
-        block: { type: "tool-call", id, name: "lab_round_report", arguments: JSON.stringify(args) },
+        block: {
+          type: "tool-call",
+          id,
+          name: "lab_round_report",
+          arguments: JSON.stringify(args),
+        },
       };
       yield { type: "usage", usage: { inputTokens: 10, outputTokens: 5 } };
       yield { type: "finish", reason: { kind: "tool-calls" } };
@@ -66,13 +71,6 @@ export function apply(ctx) {
           await ctx.agentPresets.mount(agentCtx, "lab-mission");
         },
       });
-      console.error(
-        "mode-diag",
-        JSON.stringify({
-          header: handle.agent.session.header,
-          composed: ctx.agentPresets.composedPreset(handle.agent.ctx),
-        }),
-      );
       handle.agent.followup(
         createUserMessage({
           source: { kind: "user" },
@@ -85,32 +83,25 @@ export function apply(ctx) {
         }),
       );
       await handle.agent.whenIdle();
-      console.error(
-        "mode-diag-after-turn",
-        JSON.stringify({
-          events: handle.agent.session
-            .snapshotEvents()
-            .map((event) => event.type),
-          missions: ctx.labRuntime.store.list("lab-mode-controller"),
-        }),
-      );
       const deadline = Date.now() + 5000;
       while (Date.now() < deadline) {
         const missions = ctx.labRuntime.store.list("lab-mode-controller");
         if (missions.length > 0) {
           const mission = missions[0];
           const events = ctx.labRuntime.store.events(mission.id, 100);
-          if (events.some((event) => event.kind === "session")) {
+          const sessionEvents = handle.agent.session.snapshotEvents();
+          if (events.some((event) => event.kind === "round-settled")) {
             console.log(
               JSON.stringify({
                 kind: "lab-mode-result",
                 mission,
                 events,
-                launchCard: handle.agent.session
-                  .snapshotEvents()
-                  .some((event) =>
-                    JSON.stringify(event).includes("LAB_MODE_LAUNCH_CARD"),
-                  ),
+                hasLaunchAcknowledgment: sessionEvents.some((event) =>
+                  JSON.stringify(event).includes("LAB_MODE_LAUNCH_CARD"),
+                ),
+                visibleRoundInOwner: sessionEvents.some((event) =>
+                  JSON.stringify(event).includes("lab_round_report"),
+                ),
               }),
             );
             ctx.appExit(0);
@@ -119,7 +110,9 @@ export function apply(ctx) {
         }
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
-      throw new Error("mode fixture timed out waiting for a mission and worker session");
+      throw new Error(
+        "mode fixture timed out waiting for a visible round report",
+      );
     } catch (error) {
       console.error("lab-mode-fixture-error", error);
       ctx.appExit(1);

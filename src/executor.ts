@@ -1,5 +1,5 @@
 import type { Context } from "@deepseek-ai/cordis";
-import type { AgentHandle } from "@deepseek-ai/dsh-agent";
+import type { Agent, AgentHandle } from "@deepseek-ai/dsh-agent";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import { defineTool, type ValueSchemaSpec } from "@deepseek-ai/dsh-tools";
@@ -21,24 +21,46 @@ const PLUGIN_SOURCE = { kind: "plugin:lab-runtime" } as unknown as {
   plugin: string;
 };
 
-/** Uses actual public dsh Agent APIs. Fresh sessions bound per-round context growth. */
+/** Uses public dsh Agent APIs for worker-mode and same-Session visible missions. */
 export class DshExecutor implements RoundExecutor {
   readonly workers = new Set<string>();
+  private readonly visibleRuns = new Map<
+    string,
+    { context: RoundContext; report?: RoundReport; error?: Error }
+  >();
+  private readonly visibleAgents = new Set<string>();
   constructor(
     private readonly ctx: Context,
     private readonly store: MissionStore,
     private readonly systemPrompt: string,
     private readonly workerPreset?: string,
-  ) {}
+  ) {
+    ctx.on("agent/disposed", ({ agent }) => {
+      this.visibleAgents.delete(agent.id);
+      this.visibleRuns.delete(agent.id);
+    });
+  }
+  canRun(mission: import("./types.js").Mission): boolean {
+    return (
+      mission.executionMode !== "visible" ||
+      this.ctx.agents.get(SessionId(mission.owner)) !== undefined
+    );
+  }
   async run(context: RoundContext): Promise<RoundReport> {
     let report: RoundReport | undefined;
     let turnError: Error | undefined;
     let handle: AgentHandle | undefined;
     const store = this.store;
     const parent = this.ctx.agents.get(SessionId(context.lease.mission.owner));
+    if (context.lease.mission.executionMode === "visible") {
+      if (parent === undefined)
+        throw new Error(
+          "Visible owner Session disappeared before the round started",
+        );
+      return this.runVisible(parent, context);
+    }
     const presetService = parent?.ctx.get("agentPresets") as
-      | AgentPresetRuntime
-      | undefined;
+      AgentPresetRuntime | undefined;
     const workerPreset =
       this.workerPreset ??
       (parent === undefined
@@ -77,16 +99,16 @@ export class DshExecutor implements RoundExecutor {
         setup: async (agentCtx) => {
           if (this.workerPreset !== undefined) {
             const childPresets = agentCtx.get("agentPresets") as
-              | AgentPresetRuntime
-              | undefined;
+              AgentPresetRuntime | undefined;
             if (childPresets === undefined)
               throw new Error(
                 `Configured mission worker preset "${this.workerPreset}" requires agentPresets`,
               );
             await childPresets.mount(agentCtx, this.workerPreset);
           } else if (parent !== undefined) {
-            (agentCtx.get("agentPresets") as AgentPresetRuntime | undefined)
-              ?.composeFrom(agentCtx, parent.ctx);
+            (
+              agentCtx.get("agentPresets") as AgentPresetRuntime | undefined
+            )?.composeFrom(agentCtx, parent.ctx);
           }
           agentCtx.systemPrompt.section({
             name: "lab-security-research-system-prompt-v3.1",
@@ -252,7 +274,7 @@ export class DshExecutor implements RoundExecutor {
             defineTool({
               name: "lab_round_report",
               description:
-                "Conclude this round with a durable handoff. continue for next work; wait for an external event; blocked for human input; complete only for a verified finite objective. Evidence must name actual results. This ends the current turn.",
+                "用持久交接结束本轮。continue 表示继续研究，wait 表示等待后自动重试；finite Mission 只有在证据充分时才能 complete。continuous Mission 永远不能 complete 或 blocked，遇到障碍也必须使用 wait；只有用户通过 lab_mission_control 手动暂停或停止。证据必须写明实际结果。本工具会结束当前轮次。",
               parameters: {
                 action: {
                   type: "string",
@@ -276,13 +298,13 @@ export class DshExecutor implements RoundExecutor {
                   throw new Error(
                     "checkpoint must contain 1..16000 characters",
                   );
+                const action =
+                  context.lease.mission.mode === "continuous" &&
+                  (args.action === "complete" || args.action === "blocked")
+                    ? "wait"
+                    : args.action;
                 if (
-                  args.action === "complete" &&
-                  context.lease.mission.mode === "continuous"
-                )
-                  throw new Error("Continuous mission: use wait or blocked");
-                if (
-                  args.action === "complete" &&
+                  action === "complete" &&
                   (!args.evidence.some((e) => e.trim()) ||
                     context.tasks.list().some((t) => t.status !== "done"))
                 )
@@ -302,7 +324,7 @@ export class DshExecutor implements RoundExecutor {
                 )
                   throw new Error("Evidence exceeds size limit");
                 report = {
-                  action: args.action,
+                  action,
                   checkpoint: args.checkpoint,
                   evidence: args.evidence,
                   progress: args.progress,
@@ -354,6 +376,304 @@ export class DshExecutor implements RoundExecutor {
       this.workers.delete(id);
     }
   }
+
+  private async runVisible(
+    agent: Agent,
+    context: RoundContext,
+  ): Promise<RoundReport> {
+    if (this.visibleRuns.has(agent.id))
+      throw new Error(`Visible mission already active in Session ${agent.id}`);
+    this.installVisibleTools(agent);
+    const state: {
+      context: RoundContext;
+      report?: RoundReport;
+      error?: Error;
+    } = {
+      context,
+    };
+    this.visibleRuns.set(agent.id, state);
+    const onAbort = () =>
+      agent.cancel({ kind: "hook", reason: "Visible mission round cancelled" });
+    try {
+      context.signal.addEventListener("abort", onAbort, { once: true });
+      context.signal.throwIfAborted();
+      agent.followup(
+        createUserMessage({
+          source: PLUGIN_SOURCE,
+          content: [{ type: "text", text: buildPrompt(context, true) }],
+        }),
+      );
+      await agent.whenIdle();
+      context.signal.throwIfAborted();
+      if (state.error) throw state.error;
+      const end = agent.session
+        .snapshotEvents()
+        .findLast((event) => event.type === "turn/end");
+      if (
+        end?.type === "turn/end" &&
+        end.data.reason.kind === "aborted" &&
+        end.data.reason.reason.kind === "user" &&
+        state.report === undefined
+      ) {
+        return {
+          action: "wait",
+          checkpoint:
+            context.lease.mission.checkpoint ||
+            "本轮可见研究被用户打断，尚未产生新的 checkpoint；下一轮从当前会话轨迹继续。",
+          evidence: ["用户打断了可见研究轮次，不能据此推断为执行失败。"],
+          progress: false,
+          waitMs: 60000,
+        };
+      }
+      if (end?.type === "turn/end" && end.data.reason.kind !== "completed")
+        throw new Error(
+          `Visible dsh turn did not complete: ${JSON.stringify(end.data.reason)}`,
+        );
+      if (!state.report)
+        throw new Error(
+          `Visible Session ended without lab_round_report (${context.lease.mission.id})`,
+        );
+      return state.report;
+    } finally {
+      context.signal.removeEventListener("abort", onAbort);
+      if (this.visibleRuns.get(agent.id) === state)
+        this.visibleRuns.delete(agent.id);
+    }
+  }
+
+  private installVisibleTools(agent: Agent): void {
+    if (this.visibleAgents.has(agent.id)) return;
+    this.visibleAgents.add(agent.id);
+    const store = this.store;
+    const active = (exec: { agent?: Agent }) =>
+      exec.agent === undefined
+        ? undefined
+        : this.visibleRuns.get(exec.agent.id);
+    const contextFor = (exec: { agent?: Agent }) => {
+      const state = active(exec);
+      if (!state)
+        throw new Error("No visible mission round is active in this Session");
+      state.context.signal.throwIfAborted();
+      this.store.assertLease(state.context.lease);
+      return { context: state.context, state };
+    };
+    agent.ctx.systemPrompt.section({
+      name: "lab-security-research-system-prompt-v3.1",
+      order:
+        agent.ctx.systemPrompt.getSectionOrder("DEPLOYMENT_PERSONA_SUFFIX") + 1,
+      text: this.systemPrompt,
+    });
+    agent.ctx.on("tools/pre-execute", async (exec, next) => {
+      const state = active(exec);
+      if (!state || exec.name.startsWith("lab_")) return next();
+      const reason = hostGuard(
+        exec.name,
+        exec.arguments,
+        state.context.lease.mission.cwd,
+      );
+      return reason === undefined ? next() : { kind: "deny", reason };
+    });
+    agent.ctx.on("agent/pre-step", async (_payload, next) => {
+      const state = this.visibleRuns.get(agent.id);
+      if (!state) return next();
+      state.context.signal.throwIfAborted();
+      this.store.assertLease(state.context.lease);
+      return next();
+    });
+    agent.ctx.on("agent/error", ({ error }) => {
+      const state = this.visibleRuns.get(agent.id);
+      if (state)
+        state.error = error instanceof Error ? error : new Error(String(error));
+    });
+    agent.ctx.tools.register(
+      defineTool({
+        name: "lab_checkpoint",
+        description:
+          "Persist visible mission progress, results, paths, unresolved questions, and the exact next action.",
+        parameters: { checkpoint: { type: "string", required: true } },
+        output: jsonOutput,
+        async execute(args, exec) {
+          const { context } = contextFor(exec);
+          context.checkpoint(args.checkpoint);
+          return JSON.stringify({ saved: true });
+        },
+      }),
+    );
+    agent.ctx.tools.register(
+      defineTool({
+        name: "lab_tasks",
+        description:
+          "Persistent task DAG for this mission. List first; create tasks with dependency IDs; updates use revision compare-and-set and done requires evidence.",
+        parameters: {
+          action: {
+            type: "string",
+            enum: ["list", "create", "update"],
+            required: true,
+          },
+          title: { type: "string" },
+          depends_on: { type: "array", items: { type: "string" } },
+          task_id: { type: "string" },
+          revision: { type: "integer" },
+          status: { type: "string", enum: ["pending", "doing", "done"] },
+          evidence: { type: "array", items: { type: "string" } },
+        },
+        output: jsonOutput,
+        async execute(args, exec) {
+          const { context } = contextFor(exec);
+          if (args.action === "list")
+            return JSON.stringify(context.tasks.list());
+          if (args.action === "create") {
+            if (!args.title) throw new Error("title required");
+            return JSON.stringify(
+              context.tasks.create(args.title, args.depends_on ?? []),
+            );
+          }
+          if (!args.task_id || args.revision === undefined || !args.status)
+            throw new Error("task_id, revision and status required");
+          return JSON.stringify(
+            context.tasks.update(
+              args.task_id,
+              args.revision,
+              args.status,
+              args.evidence ?? [],
+            ),
+          );
+        },
+      }),
+    );
+    agent.ctx.tools.register(
+      defineTool({
+        name: "lab_finding",
+        description:
+          "Record a vulnerability finding with prerequisites and evidence files inside this mission workspace; evidence is SHA-256 hashed.",
+        parameters: {
+          title: { type: "string", required: true },
+          target: { type: "string", required: true },
+          classification: {
+            type: "string",
+            enum: [
+              "static",
+              "lab-reproduced",
+              "impact-verified",
+              "not-reproduced",
+            ],
+            required: true,
+          },
+          prerequisites: { type: "string", required: true },
+          evidence_paths: {
+            type: "array",
+            items: { type: "string" },
+            required: true,
+          },
+        },
+        output: jsonOutput,
+        async execute(args, exec) {
+          const { context } = contextFor(exec);
+          const origin = new URL(args.target).origin;
+          if (!context.lease.mission.targets.includes(origin))
+            throw new Error("Finding target outside mission scope");
+          if (
+            !args.title.trim() ||
+            args.title.length > 2000 ||
+            !args.prerequisites.trim() ||
+            args.prerequisites.length > 4000
+          )
+            throw new Error("Title/prerequisites required within size limits");
+          if (args.classification !== "static" && !args.evidence_paths.length)
+            throw new Error("Validation requires saved evidence");
+          if (args.evidence_paths.length > 16)
+            throw new Error("At most 16 evidence files per finding");
+          const root = realpathSync(context.lease.mission.cwd);
+          const evidence = args.evidence_paths.map((path) => {
+            const full = realpathSync(resolve(root, path));
+            const rel = relative(root, full);
+            if (rel.startsWith("..") || isAbsolute(rel))
+              throw new Error("Evidence file outside workspace");
+            const stat = statSync(full);
+            if (!stat.isFile() || stat.size > 16 * 1024 * 1024)
+              throw new Error("Evidence must be a file under 16 MiB");
+            return {
+              path: rel,
+              sha256: createHash("sha256")
+                .update(readFileSync(full))
+                .digest("hex"),
+            };
+          });
+          return JSON.stringify(
+            store.addFinding(context.lease, {
+              title: args.title,
+              target: origin,
+              classification: args.classification,
+              prerequisites: args.prerequisites,
+              evidence,
+            }),
+          );
+        },
+      }),
+    );
+    agent.ctx.tools.register(
+      defineTool({
+        name: "lab_round_report",
+        description:
+          "结束本轮可见研究；运行时会在同一个 Session 中继续，所有工具调用和结果都会保留在当前轨迹。当前会话只绑定一个 Mission，用户后续消息是对该 Mission 的纠正或补充，不得创建第二个 Mission。continuous Mission 永远不能 complete 或 blocked，遇到障碍必须使用 wait；只有用户通过 lab_mission_control 手动暂停或停止。",
+        parameters: {
+          action: {
+            type: "string",
+            enum: ["continue", "wait", "complete", "blocked"],
+            required: true,
+          },
+          checkpoint: { type: "string", required: true },
+          evidence: {
+            type: "array",
+            items: { type: "string" },
+            required: true,
+          },
+          progress: { type: "boolean", required: true },
+          wait_ms: { type: "integer" },
+        },
+        output: jsonOutput,
+        async execute(args, exec) {
+          const { context, state } = contextFor(exec);
+          if (!args.checkpoint.trim() || args.checkpoint.length > 16000)
+            throw new Error("checkpoint must contain 1..16000 characters");
+          const action =
+            context.lease.mission.mode === "continuous" &&
+            (args.action === "complete" || args.action === "blocked")
+              ? "wait"
+              : args.action;
+          if (
+            action === "complete" &&
+            (!args.evidence.some((e) => e.trim()) ||
+              context.tasks.list().some((t) => t.status !== "done"))
+          )
+            throw new Error(
+              "Completion needs evidence and all declared tasks done",
+            );
+          const waitMs = args.wait_ms ?? 60000;
+          if (
+            !Number.isSafeInteger(waitMs) ||
+            waitMs < 1000 ||
+            waitMs > 7 * 86400000
+          )
+            throw new Error("wait_ms must be between 1000 and 604800000");
+          if (
+            args.evidence.length > 32 ||
+            args.evidence.some((e) => e.length > 2000)
+          )
+            throw new Error("Evidence exceeds size limit");
+          state.report = {
+            action,
+            checkpoint: args.checkpoint,
+            evidence: args.evidence,
+            progress: args.progress,
+            waitMs,
+          };
+          exec.concludeTurn();
+          return JSON.stringify({ accepted: true, visibleSession: true });
+        },
+      }),
+    );
+  }
 }
 
 interface AgentPresetRuntime {
@@ -367,21 +687,22 @@ const jsonOutput = {
     { type: "text" as const, text: value },
   ],
 } as const;
-function buildPrompt(context: RoundContext): string {
+function buildPrompt(context: RoundContext, visible = false): string {
   const m = context.lease.mission;
   const tasks = context.tasks.list();
-  return `You are carrying out round ${m.round + 1} of a durable autonomous mission.
-Goal: ${m.goal}
-Mode: ${m.mode}. ${m.mode === "continuous" ? "This objective persists. When no work is actionable, report wait with a sensible delay." : "Finish when evidence proves the requested outcome."}
-Workspace: ${m.cwd}
-Explicit authorized target origins: ${JSON.stringify(m.targets)}
-Stay within these targets. Do not test other hosts, exfiltrate real user data, or perform destructive validation. Use minimal synthetic canaries and save exact requests/responses. lab_finding records the evidence hashes and distinguishes static hints, lab reproduction, and verified impact; do not conflate these classes. Target declarations guide tools and reporting, but OS/container network isolation must be configured by deployment.
-Latest checkpoint (verify facts against actual files):
-${m.checkpoint || "(no checkpoint yet)"}
-Task board summary: ${JSON.stringify(tasks.slice(-20).map((t) => ({ id: t.id, title: t.title, status: t.status, revision: t.revision })))}
+  return `你正在执行持久自主任务的第 ${m.round + 1} 轮${visible ? "，并且直接运行在用户当前的 Agent 会话中" : ""}。
+当前会话只绑定一个 Mission。第一条用户消息定义目标；后续用户消息都是对这个 Mission 的纠正、补充、优先级调整或范围说明，不是新任务。把它们合并到当前计划、checkpoint、任务看板和下一步行动中，不要调用 lab_mission_start，不要创建第二个 Mission，也不要把纠正内容单独登记成任务。只有用户明确要求暂停、恢复或停止时才调用 lab_mission_control。
+目标：${m.goal}
+模式：${m.mode}。${m.mode === "continuous" ? "该目标会持续存在；没有可执行工作时，使用 wait 并设置合理等待时间。" : "只有证据证明目标已经完成时才结束。"}
+工作区：${m.cwd}
+已授权目标 origin：${JSON.stringify(m.targets)}
+只能在这些目标内行动。不得测试其他主机、导出真实用户数据或进行超出授权的破坏性验证。使用最小化合成测试数据，并保存准确的请求与响应。lab_finding 会记录证据哈希，并区分静态线索、实验室复现和已验证影响；不得混淆这些类别。目标声明用于约束工具和报告范围，操作系统与容器网络隔离必须由部署环境提供。
+最近 checkpoint（必须用实际文件校验事实）：
+${m.checkpoint || "（尚无 checkpoint）"}
+任务看板摘要：${JSON.stringify(tasks.slice(-20).map((t) => ({ id: t.id, title: t.title, status: t.status, revision: t.revision })))}
 
-Make concrete progress using tools and verifiable experiments. You may delegate with installed dsh tools when useful; coordinate shared files. Maintain a durable task DAG with lab_tasks. Prefer external artifacts for detailed notes. Call lab_checkpoint during meaningful work so a crash does not discard the handoff. This round uses a fresh Session; inspect workspace and checkpoint instead of assuming earlier conversation is available.
-You MUST finish with lab_round_report. Include exact completed work, failed approaches, evidence paths/results, and the next useful action. Use blocked when human input or authorization is needed. Use wait for unavailable external work; do not loop or invent activity. Never claim commands ran without tool evidence. A crash can replay this round: make external changes idempotent and check existing results before repeating them. There is no total token/round budget; provider context limits and per-round operational timeouts still apply.`;
+使用工具和可验证实验取得具体进展。${visible ? "不要委托、创建子智能体或创建子会话；直接在当前会话中工作，让用户在普通轨迹中看到进展、工具调用和结果。" : "如果已安装相应 dsh 工具，可以在确有帮助时委托，并协调共享文件。"} 使用 lab_tasks 维护持久任务 DAG。在有意义的进展后调用 lab_checkpoint，避免崩溃丢失交接信息。${visible ? "之前的对话仍然可见，但重要事实必须与持久 checkpoint 和实际文件核对。" : "本轮使用新的会话；必须检查工作区和 checkpoint，不能假设上一轮对话仍然可用。"}
+必须以 lab_round_report 结束本轮。写明准确完成的工作、失败的方法、证据路径或结果以及下一步具体行动。${m.mode === "continuous" ? "这是常驻 Mission：不得使用 complete 或 blocked；遇到人类输入、授权或外部依赖问题时记录缺口并使用 wait，之后自动重试。不得自行调用 lab_mission_control；只有用户明确要求时才暂停或停止。" : "需要人类输入或授权时使用 blocked；只有证据充分时使用 complete。"} 外部目标暂不可用时使用 wait；不得循环制造活动或编造进展。没有工具证据时不得声称命令已经执行。轮次可能因崩溃而重放：外部修改必须幂等，重复前先检查已有结果。系统没有设置总 token 或轮次上限，但 provider 上下文、单轮运行时限和部署费用仍是真实边界。所有说明和报告使用简体中文；工具名、参数、枚举值、路径、命令和代码标识保留原文。`;
 }
 
 const CLASH_PATTERN = /\b(clashx?|mihomo|clash[- ]?verge)\b/i;
@@ -398,10 +719,10 @@ export function hostGuard(
 ): string | undefined {
   const serialized = JSON.stringify(args);
   if (CLASH_PATTERN.test(serialized)) {
-    return "Clash/Mihomo is explicitly out of scope: do not read, modify, control, probe, or route traffic through it.";
+    return "Clash/Mihomo 明确不在任务范围内：不得读取、修改、控制、探测或通过它转发流量。";
   }
   if (/computer|cua|osascript|applescript/i.test(name)) {
-    return "Host GUI and system control are outside the lab boundary.";
+    return "宿主 GUI 和系统控制不在实验室边界内。";
   }
   const record =
     typeof args === "object" && args !== null
@@ -412,17 +733,17 @@ export function hostGuard(
     const target = resolve(workspace, filePath);
     const rel = relative(workspace, target);
     if (rel.startsWith("..") || isAbsolute(rel)) {
-      return "File writes are restricted to the mission workspace; the macOS host is out of scope.";
+      return "文件写入仅限 mission 工作区；macOS 宿主不在任务范围内。";
     }
   }
   const command = record.command ?? record.cmd;
   if (typeof command === "string") {
     const guardedCommand = command.split(workspace).join("<workspace>");
     if (HOST_COMMAND_PATTERN.test(guardedCommand)) {
-      return "This command can modify the macOS host; run the equivalent inside the isolated lab instead.";
+      return "该命令可能修改 macOS 宿主；请改为在隔离实验室内执行等价操作。";
     }
     if (HOST_PATH_PATTERN.test(guardedCommand)) {
-      return "Commands referencing host home/system paths are blocked; use paths inside the mission workspace or the isolated lab.";
+      return "引用宿主 home 或系统路径的命令已拦截；请使用 mission 工作区或隔离实验室内的路径。";
     }
   }
   return undefined;

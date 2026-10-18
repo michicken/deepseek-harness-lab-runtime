@@ -90,7 +90,7 @@ export class LabService extends Service {
       );
     const systemPrompt = readFileSync(promptFile, "utf8").trim();
     if (
-      !systemPrompt.includes("System Prompt V3.1-LAB") ||
+      !systemPrompt.includes("系统提示词 V3.1-LAB") ||
       !systemPrompt.includes("长期无人值守运行协议")
     )
       throw new Error(
@@ -117,7 +117,7 @@ export class LabService extends Service {
       defineTool({
         name: "lab_mission_start",
         description:
-          "Start a durable autonomous mission on an authorized workspace. A separate worker Session runs each round, continuing automatically across restarts. No total token budget is set. Use continuous for ongoing research/operations and finite for an objective with an end condition.",
+          "在授权工作区启动一个持久自主 Mission。Lab Mission (24h) 模式会在当前 Agent 和 Session 中直接运行，普通工具调用与结果可见；同一个 Session 只允许一个未结束 Mission。后续用户消息应作为当前 Mission 的纠正或补充，不得创建第二个 Mission。continuous 用于持续研究，finite 用于有明确结束条件的目标；系统不设置总 token 上限。",
         parameters: {
           goal: { type: "string", required: true },
           cwd: { type: "string", required: true },
@@ -150,6 +150,13 @@ export class LabService extends Service {
             provider,
             model,
             ...(args.mode ? { mode: args.mode } : {}),
+            ...(config.missionModePreset !== undefined &&
+            currentAgentPreset(exec.agent.session) === config.missionModePreset
+              ? {
+                  mode: "continuous" as const,
+                  executionMode: "visible" as const,
+                }
+              : {}),
           });
           service.runtime.tick();
           return JSON.stringify(publicMission(mission));
@@ -157,9 +164,8 @@ export class LabService extends Service {
       }),
     );
 
-    // Dedicated controller mode: the first message in a fresh Lab Mission
-    // session becomes the mission goal automatically. No tool call is needed
-    // from the user, and the controller never performs the research itself.
+    // The first message in a Lab Mission session creates a visible mission.
+    // DshExecutor runs each round in this same Agent; no child Agent is spawned.
     ctx.on("agent/pre-step", async ({ agent, messages }, next) => {
       if (process.env.LAB_RUNTIME_DEBUG)
         console.error(
@@ -225,6 +231,7 @@ export class LabService extends Service {
           model: agent.options.model ?? selection.model,
           targets: config.allowedTargets,
           mode: "continuous",
+          executionMode: "visible",
         });
         service.runtime.tick();
         return {
@@ -234,7 +241,7 @@ export class LabService extends Service {
               content: [
                 {
                   type: "text",
-                  text: `Mission ${mission.id} has been created and queued for durable execution. Goal: ${goal}. The runtime is running worker Sessions that appear as child sessions of this controller. Reply with a short launch card: mission id, target scope, workspace, and how to ask for status. Do not perform the research yourself and do not call lab_mission_start.`,
+                  text: `Mission ${mission.id} 已在当前同一会话中可见运行。目标：${goal}。请用简体中文简短告知用户已开始；后续研究轮次会在当前会话使用普通工具继续。这个会话只允许一个 Mission；用户后续消息视为对当前 Mission 的纠正或补充，不得委托、创建子会话、调用 lab_mission_start 或把纠正当成新任务。`,
                 },
               ],
               source: PLUGIN_SOURCE,
@@ -257,6 +264,27 @@ export class LabService extends Service {
           ],
         };
       }
+    });
+    ctx.on("agent/created", ({ agent }) => {
+      if (
+        config.missionModePreset === undefined ||
+        currentAgentPreset(agent.session) !== config.missionModePreset
+      )
+        return;
+      const hidden = service.store
+        .list(agent.id)
+        .find(
+          (mission) =>
+            mission.executionMode !== "visible" &&
+            !["stopped", "completed"].includes(mission.status),
+        );
+      if (hidden === undefined) return;
+      service.runtime.cancelMission(
+        hidden.id,
+        "Adopting the active mission into its visible owner Session",
+      );
+      service.store.adoptVisible(hidden.id, agent.id);
+      service.runtime.tick();
     });
     ctx.tools.register(
       defineTool({

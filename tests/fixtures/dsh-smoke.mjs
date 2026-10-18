@@ -15,7 +15,7 @@ class ScriptedAdapter extends LlmAdapter {
       .map((b) => b.text)
       .join("\n");
     if (
-      !systemText.includes("System Prompt V3.1-LAB") ||
+      !systemText.includes("系统提示词 V3.1-LAB") ||
       !systemText.includes("长期无人值守运行协议")
     )
       throw new Error(
@@ -25,7 +25,9 @@ class ScriptedAdapter extends LlmAdapter {
       .filter((b) => b.type === "text")
       .map((b) => b.text)
       .join("\n");
-    const round = Number(prompt.match(/carrying out round (\d+)/)?.[1] ?? 1);
+    const round = Number(
+      prompt.match(/正在执行持久自主任务的第 (\d+) 轮/)?.[1] ?? 1,
+    );
     const called = content
       .filter((b) => b.type === "tool-call")
       .map((b) => b.name);
